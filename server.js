@@ -1,0 +1,603 @@
+/*
+ * server.js — 정적 파일 서빙 + WebSocket 게임 서버.
+ * 게임 상태는 서버가 권위(authoritative)를 갖고 60Hz로 진행하며 30Hz로 스냅샷을 뿌린다.
+ */
+'use strict';
+
+const http = require('http');
+const fs = require('fs');
+const path = require('path');
+const { WebSocketServer } = require('ws');
+const S = require('./public/shared.js');
+
+const PORT = process.env.PORT || 3210;
+const PUBLIC_DIR = path.join(__dirname, 'public');
+
+const MIME = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.png': 'image/png',
+  '.svg': 'image/svg+xml',
+  '.ico': 'image/x-icon'
+};
+
+const server = http.createServer((req, res) => {
+  let urlPath = decodeURIComponent(req.url.split('?')[0]);
+  if (urlPath === '/' || urlPath === '') urlPath = '/index.html';
+  const target = path.join(PUBLIC_DIR, path.normalize(urlPath).replace(/^[\\/]+/, ''));
+  if (!target.startsWith(PUBLIC_DIR)) {
+    res.writeHead(403); res.end('forbidden'); return;
+  }
+  fs.readFile(target, (err, data) => {
+    if (err) { res.writeHead(404); res.end('not found'); return; }
+    res.writeHead(200, { 'Content-Type': MIME[path.extname(target)] || 'application/octet-stream' });
+    res.end(data);
+  });
+});
+
+// ---------------------------------------------------------------- 게임 상수
+
+const PLAYER_COLORS = ['#5fe07a', '#5fc8ff', '#ff8fd0', '#ffd75f'];
+const PLAYER_NAMES_FALLBACK = ['Bub', 'Bob', 'Pug', 'Pat'];
+const MAX_PLAYERS = 4;
+
+const FIRE_COOLDOWN = 16;
+const BUBBLE_SHOT_SPEED = 3.6;
+const BUBBLE_SHOT_FRAMES = 26;
+const BUBBLE_RISE = -0.55;
+const BUBBLE_LIFE = 540;
+const TRAP_TIME = 330;
+const RESPAWN_DELAY = 90;
+const INVULN_TIME = 150;
+const COMBO_WINDOW = 50;
+
+const FRUITS = [
+  { kind: 0, value: 100 }, { kind: 1, value: 200 }, { kind: 2, value: 300 },
+  { kind: 3, value: 500 }, { kind: 4, value: 700 }, { kind: 5, value: 1000 }
+];
+
+// ---------------------------------------------------------------- 방 관리
+
+/** @type {Map<string, object>} */
+const rooms = new Map();
+
+function makeRoomCode() {
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let code;
+  do {
+    code = '';
+    for (let i = 0; i < 4; i++) code += alphabet[Math.floor(Math.random() * alphabet.length)];
+  } while (rooms.has(code));
+  return code;
+}
+
+function createRoom(code) {
+  const room = {
+    code,
+    players: new Map(),
+    bubbles: [],
+    enemies: [],
+    fruits: [],
+    pops: [],          // 시각 효과(터짐) 이벤트
+    level: 0,
+    round: 0,          // 전체 스테이지를 한 바퀴 돌 때마다 +1 (난이도 상승)
+    map: null,
+    playerSpawns: [],
+    nextId: 1,
+    tick: 0,
+    phase: 'play',     // play | clear | over
+    phaseTimer: 0,
+    combo: 0,
+    comboTimer: 0,
+    message: ''
+  };
+  rooms.set(code, room);
+  loadLevel(room, 0);
+  return room;
+}
+
+function loadLevel(room, index) {
+  const parsed = S.parseLevel(index);
+  room.level = index;
+  room.map = parsed.rows;
+  room.playerSpawns = parsed.playerSpawns;
+  room.bubbles = [];
+  room.fruits = [];
+  room.enemies = parsed.enemySpawns.map((sp, i) => makeEnemy(room, sp, i));
+  room.combo = 0;
+  room.comboTimer = 0;
+
+  let slot = 0;
+  for (const p of room.players.values()) {
+    placePlayerAtSpawn(room, p, slot++);
+    p.respawn = 0;
+    p.invuln = INVULN_TIME;
+  }
+}
+
+function makeEnemy(room, spawn, i) {
+  return {
+    id: room.nextId++,
+    x: spawn.x, y: spawn.y,
+    w: S.EW, h: S.EH,
+    vx: 0, vy: 0,
+    dir: i % 2 === 0 ? 1 : -1,
+    onGround: false,
+    type: i % 3 === 2 ? 1 : 0, // 0: 걷는 적, 1: 잘 뛰는 적
+    angry: 0,
+    thinkTimer: 30 + Math.floor(Math.random() * 60)
+  };
+}
+
+function createPlayer(room, socket, rawName) {
+  const slot = room.players.size;
+  const name = String(rawName || '').trim().slice(0, 10) || PLAYER_NAMES_FALLBACK[slot];
+  const player = {
+    id: room.nextId++,
+    socket,
+    name,
+    slot,
+    color: PLAYER_COLORS[slot % PLAYER_COLORS.length],
+    x: 0, y: 0, vx: 0, vy: 0, w: S.PW, h: S.PH,
+    facing: 1, onGround: false, jumpHeld: false, ridingId: 0,
+    coyote: 0, jumpBuffer: 0,
+    input: { left: false, right: false, jump: false, fire: false },
+    fireHeld: false, fireCooldown: 0,
+    score: 0, lives: 3, respawn: 0, invuln: INVULN_TIME
+  };
+  placePlayerAtSpawn(room, player, slot);
+  room.players.set(player.id, player);
+  return player;
+}
+
+function placePlayerAtSpawn(room, p, slotIndex) {
+  const sp = room.playerSpawns[slotIndex % room.playerSpawns.length];
+  // 시작 지점보다 인원이 많으면 서로 겹치지 않게 살짝 어긋나게 놓는다
+  const wrap = Math.floor(slotIndex / room.playerSpawns.length);
+  p.x = Math.max(S.TILE, Math.min(S.W - S.TILE - p.w, sp.x + wrap * 20));
+  p.y = sp.y;
+  p.vx = 0; p.vy = 0;
+  p.onGround = false;
+  p.jumpHeld = false;
+  p.ridingId = 0;
+}
+
+function enemySpeed(room) {
+  return 0.85 + Math.min(room.round, 4) * 0.1;
+}
+
+// ---------------------------------------------------------------- 게임 진행
+
+function stepRoom(room) {
+  room.tick++;
+
+  if (room.phase === 'clear') {
+    if (--room.phaseTimer <= 0) {
+      const next = room.level + 1;
+      if (next % S.LEVELS.length === 0) room.round++;
+      loadLevel(room, next);
+      room.phase = 'play';
+      room.message = '';
+    }
+    return;
+  }
+
+  if (room.phase === 'over') {
+    if (--room.phaseTimer <= 0) {
+      room.round = 0;
+      for (const p of room.players.values()) { p.lives = 3; p.score = 0; }
+      loadLevel(room, 0);
+      room.phase = 'play';
+      room.message = '';
+    }
+    return;
+  }
+
+  stepPlayers(room);
+  stepEnemies(room);
+  stepBubbles(room);
+  stepFruits(room);
+  resolveCollisions(room);
+
+  if (room.comboTimer > 0 && --room.comboTimer === 0) room.combo = 0;
+  if (room.pops.length > 24) room.pops.length = 24;
+
+  // 스테이지 클리어 판정
+  const trapped = room.bubbles.some((b) => b.enemy !== null);
+  if (room.enemies.length === 0 && !trapped && room.players.size > 0) {
+    room.phase = 'clear';
+    room.phaseTimer = 150;
+    room.message = 'STAGE CLEAR!';
+    return;
+  }
+
+  // 게임 오버 판정 (플레이어 전원 잔기 소진)
+  if (room.players.size > 0) {
+    let anyAlive = false;
+    for (const p of room.players.values()) if (p.lives > 0) anyAlive = true;
+    if (!anyAlive) {
+      room.phase = 'over';
+      room.phaseTimer = 300;
+      room.message = 'GAME OVER';
+    }
+  }
+}
+
+function stepPlayers(room) {
+  for (const p of room.players.values()) {
+    if (p.lives <= 0) continue;
+
+    if (p.respawn > 0) {
+      if (--p.respawn === 0) {
+        placePlayerAtSpawn(room, p, p.slot);
+        p.invuln = INVULN_TIME;
+      }
+      continue;
+    }
+
+    S.stepPlayer(p, p.input, room.map, room.bubbles);
+    if (p.invuln > 0) p.invuln--;
+    if (p.fireCooldown > 0) p.fireCooldown--;
+
+    if (p.input.fire && !p.fireHeld && p.fireCooldown <= 0) {
+      fireBubble(room, p);
+      p.fireCooldown = FIRE_COOLDOWN;
+    }
+    p.fireHeld = !!p.input.fire;
+  }
+}
+
+function fireBubble(room, p) {
+  room.bubbles.push({
+    id: room.nextId++,
+    x: p.x + p.w / 2 + p.facing * 12,
+    y: p.y + p.h / 2 - 1,
+    vx: p.facing * BUBBLE_SHOT_SPEED,
+    phase: 0,          // 0: 날아가는 중, 1: 떠오르는 중
+    timer: 0,
+    life: 0,
+    enemy: null,       // 갇힌 적의 type
+    trapTimer: 0,
+    owner: p.id,
+    wobble: Math.random() * Math.PI * 2
+  });
+}
+
+function stepEnemies(room) {
+  const speed = enemySpeed(room);
+  for (const e of room.enemies) {
+    if (--e.thinkTimer <= 0) {
+      e.thinkTimer = 45 + Math.floor(Math.random() * 90);
+      const target = nearestPlayer(room, e);
+      if (target && Math.random() < 0.65) {
+        e.dir = target.x + target.w / 2 < e.x + e.w / 2 ? -1 : 1;
+      }
+      if (e.onGround && (e.type === 1 || Math.random() < 0.3)) {
+        if (target && target.y + target.h < e.y) e.vy = S.JUMP * 0.85;
+      }
+    }
+
+    e.vx = e.dir * speed * (e.angry ? 1.7 : 1);
+    e.vy += S.GRAVITY;
+    if (e.vy > S.MAXFALL) e.vy = S.MAXFALL;
+
+    S.moveX(e, room.map);
+    if (e.hitWall) e.dir *= -1;
+
+    const prevOnGround = e.onGround;
+    S.moveY(e, room.map, true);
+
+    // 발판 끝에서 절반의 확률로 방향을 튼다 (나머지는 그대로 떨어짐)
+    if (prevOnGround && e.onGround) {
+      const footCol = Math.floor((e.x + (e.dir > 0 ? e.w + 1 : -1)) / S.TILE);
+      const footRow = Math.floor((e.y + e.h + 1) / S.TILE);
+      const supported = S.isSolid(room.map, footCol, footRow) || S.isOneWay(room.map, footCol, footRow);
+      if (!supported && Math.random() < 0.5) e.dir *= -1;
+    }
+
+    if (e.y > S.H) { e.y = S.TILE; e.vy = 0; } // 혹시라도 바닥을 빠져나가면 위에서 재등장
+  }
+}
+
+function nearestPlayer(room, e) {
+  let best = null, bestDist = Infinity;
+  for (const p of room.players.values()) {
+    if (p.lives <= 0 || p.respawn > 0) continue;
+    const d = Math.abs(p.x - e.x) + Math.abs(p.y - e.y);
+    if (d < bestDist) { bestDist = d; best = p; }
+  }
+  return best;
+}
+
+function stepBubbles(room) {
+  for (let i = room.bubbles.length - 1; i >= 0; i--) {
+    const b = room.bubbles[i];
+    b.life++;
+
+    if (b.phase === 0) {
+      b.x += b.vx;
+      b.timer++;
+      const col = Math.floor((b.x + (b.vx > 0 ? S.BR : -S.BR)) / S.TILE);
+      const row = Math.floor(b.y / S.TILE);
+      if (S.isSolid(room.map, col, row) || b.timer >= BUBBLE_SHOT_FRAMES) {
+        b.phase = 1;
+        b.x = Math.max(S.TILE + S.BR, Math.min(S.W - S.TILE - S.BR, b.x));
+      }
+      // 날아가는 중에만 적을 가둘 수 있다
+      if (b.enemy === null) {
+        for (let j = room.enemies.length - 1; j >= 0; j--) {
+          const e = room.enemies[j];
+          if (S.rectsOverlap(b.x - S.BR, b.y - S.BR, S.BR * 2, S.BR * 2, e.x, e.y, e.w, e.h)) {
+            b.enemy = e.type;
+            b.trapTimer = TRAP_TIME;
+            b.phase = 1;
+            room.enemies.splice(j, 1);
+            break;
+          }
+        }
+      }
+    } else {
+      b.y += BUBBLE_RISE;
+      b.x += Math.sin((b.life + b.wobble * 10) * 0.06) * 0.35;
+      b.x = Math.max(S.TILE + S.BR, Math.min(S.W - S.TILE - S.BR, b.x));
+
+      // 천장/발판 아래에 눌러붙는다
+      const rowAbove = Math.floor((b.y - S.BR) / S.TILE);
+      const colC = Math.floor(b.x / S.TILE);
+      if (S.isSolid(room.map, colC, rowAbove)) b.y = (rowAbove + 1) * S.TILE + S.BR;
+      if (b.y < S.TILE + S.BR) b.y = S.TILE + S.BR;
+    }
+
+    if (b.enemy !== null && --b.trapTimer <= 0) {
+      // 시간이 지나면 적이 화가 난 채로 풀려난다
+      room.enemies.push(Object.assign(makeEnemy(room, { x: b.x - S.EW / 2, y: b.y - S.EH / 2 }, 0), {
+        type: b.enemy, angry: 1, dir: Math.random() < 0.5 ? -1 : 1
+      }));
+      room.pops.push({ x: b.x, y: b.y, kind: 1 });
+      room.bubbles.splice(i, 1);
+      continue;
+    }
+
+    if (b.life > BUBBLE_LIFE) {
+      room.pops.push({ x: b.x, y: b.y, kind: 0 });
+      room.bubbles.splice(i, 1);
+    }
+  }
+}
+
+function stepFruits(room) {
+  for (let i = room.fruits.length - 1; i >= 0; i--) {
+    const f = room.fruits[i];
+    if (f.arm > 0) f.arm--;
+    f.vy += S.GRAVITY;
+    if (f.vy > S.MAXFALL) f.vy = S.MAXFALL;
+    f.vx = 0;
+    S.moveY(f, room.map, true);
+    if (++f.life > 600) room.fruits.splice(i, 1);
+  }
+}
+
+function resolveCollisions(room) {
+  for (const p of room.players.values()) {
+    if (p.lives <= 0 || p.respawn > 0) continue;
+
+    // 버블 터뜨리기 (올라탄 버블은 제외)
+    for (let i = room.bubbles.length - 1; i >= 0; i--) {
+      const b = room.bubbles[i];
+      if (b.id === p.ridingId) continue;
+      if (b.owner === p.id && b.phase === 0 && b.timer < 6) continue; // 방금 쏜 버블
+      if (!S.rectsOverlap(p.x, p.y, p.w, p.h, b.x - S.BR, b.y - S.BR, S.BR * 2, S.BR * 2)) continue;
+      // 버블 윗면을 밟고 서 있는 동안에는 터뜨리지 않는다 (라이딩 보호)
+      if (p.vy > -2.5 && p.y + p.h <= b.y - S.BR + 6) continue;
+
+      if (b.enemy !== null) {
+        room.combo = Math.min(room.combo + 1, 6);
+        room.comboTimer = COMBO_WINDOW;
+        const gained = 100 * Math.pow(2, room.combo - 1);
+        p.score += gained;
+        spawnFruit(room, b.x, b.y);
+        room.pops.push({ x: b.x, y: b.y, kind: 2, score: gained });
+      } else {
+        p.score += 10;
+        room.pops.push({ x: b.x, y: b.y, kind: 0 });
+      }
+      room.bubbles.splice(i, 1);
+    }
+
+    // 과일 먹기
+    for (let i = room.fruits.length - 1; i >= 0; i--) {
+      const f = room.fruits[i];
+      if (f.arm > 0) continue;
+      if (S.rectsOverlap(p.x, p.y, p.w, p.h, f.x, f.y, f.w, f.h)) {
+        p.score += f.value;
+        room.pops.push({ x: f.x + f.w / 2, y: f.y, kind: 3, score: f.value });
+        room.fruits.splice(i, 1);
+      }
+    }
+
+    // 적과 충돌
+    if (p.invuln <= 0) {
+      for (const e of room.enemies) {
+        if (S.rectsOverlap(p.x, p.y, p.w, p.h, e.x, e.y, e.w, e.h)) {
+          killPlayer(room, p);
+          break;
+        }
+      }
+    }
+  }
+}
+
+function spawnFruit(room, cx, cy) {
+  const f = FRUITS[Math.floor(Math.random() * FRUITS.length)];
+  room.fruits.push({
+    id: room.nextId++,
+    x: cx - 6, y: cy - 6, w: 12, h: 12,
+    vx: 0, vy: -1.5,
+    onGround: false,
+    kind: f.kind, value: f.value, life: 0,
+    arm: 22 // 터진 자리에서 곧바로 먹히지 않도록 잠깐 대기 (튀어오르는 게 보이게)
+  });
+}
+
+function killPlayer(room, p) {
+  p.lives--;
+  p.respawn = RESPAWN_DELAY;
+  p.invuln = INVULN_TIME;
+  room.pops.push({ x: p.x + p.w / 2, y: p.y + p.h / 2, kind: 4 });
+  p.vx = 0; p.vy = 0;
+}
+
+// ---------------------------------------------------------------- 스냅샷
+
+function snapshot(room) {
+  const players = [];
+  for (const p of room.players.values()) {
+    players.push({
+      i: p.id, n: p.name, c: p.color,
+      x: Math.round(p.x * 10) / 10, y: Math.round(p.y * 10) / 10,
+      f: p.facing, g: p.onGround ? 1 : 0,
+      s: p.score, l: p.lives,
+      v: p.invuln > 0 ? 1 : 0,
+      d: p.respawn > 0 ? 1 : 0,
+      m: Math.abs(p.vx) > 0.1 ? 1 : 0
+    });
+  }
+  return {
+    t: 's',
+    k: room.tick,
+    lv: room.level,
+    ph: room.phase,
+    msg: room.message,
+    combo: room.combo,
+    p: players,
+    b: room.bubbles.map((b) => ({
+      i: b.id, x: Math.round(b.x * 10) / 10, y: Math.round(b.y * 10) / 10,
+      e: b.enemy === null ? -1 : b.enemy, ph: b.phase,
+      w: b.enemy !== null && b.trapTimer < 90 ? 1 : 0
+    })),
+    e: room.enemies.map((e) => ({
+      i: e.id, x: Math.round(e.x * 10) / 10, y: Math.round(e.y * 10) / 10,
+      d: e.dir, t: e.type, a: e.angry
+    })),
+    f: room.fruits.map((f) => ({ i: f.id, x: Math.round(f.x), y: Math.round(f.y), k: f.kind })),
+    pop: room.pops.splice(0, room.pops.length)
+  };
+}
+
+function broadcast(room, payload) {
+  const text = JSON.stringify(payload);
+  for (const p of room.players.values()) {
+    if (p.socket.readyState === 1) p.socket.send(text);
+  }
+}
+
+// ---------------------------------------------------------------- 루프
+
+const TICK_MS = 1000 / 60;
+
+function startLoop() {
+  let lastTime = Date.now();
+  let accumulator = 0;
+
+  setInterval(() => {
+    const now = Date.now();
+    accumulator += now - lastTime;
+    lastTime = now;
+    if (accumulator > 250) accumulator = 250; // 뒤처졌을 때 따라잡기 폭주 방지
+
+    let steps = 0;
+    while (accumulator >= TICK_MS && steps < 5) {
+      accumulator -= TICK_MS;
+      steps++;
+      for (const room of rooms.values()) stepRoom(room);
+    }
+
+    if (steps > 0) {
+      for (const room of rooms.values()) {
+        if (room.tick % 2 === 0) broadcast(room, snapshot(room));
+      }
+    }
+  }, TICK_MS);
+}
+
+// ---------------------------------------------------------------- WebSocket
+
+const wss = new WebSocketServer({ server });
+
+wss.on('connection', (socket) => {
+  let player = null;
+  let room = null;
+
+  socket.on('message', (raw) => {
+    let msg;
+    try { msg = JSON.parse(raw.toString()); } catch (_) { return; }
+
+    if (msg.t === 'join') {
+      if (player) return;
+      const wanted = String(msg.room || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 4);
+      if (wanted) {
+        room = rooms.get(wanted);
+        if (!room) { socket.send(JSON.stringify({ t: 'error', m: '그런 방이 없어요. 코드를 확인해 주세요.' })); return; }
+      } else {
+        room = createRoom(makeRoomCode());
+      }
+      if (room.players.size >= MAX_PLAYERS) {
+        socket.send(JSON.stringify({ t: 'error', m: '방이 가득 찼어요 (최대 4명).' }));
+        room = null; return;
+      }
+
+      player = createPlayer(room, socket, msg.name);
+
+      socket.send(JSON.stringify({
+        t: 'joined', room: room.code, id: player.id, level: room.level, color: player.color, name: player.name
+      }));
+      broadcast(room, { t: 'chat', m: `${player.name} 님이 입장했습니다.` });
+      return;
+    }
+
+    if (!player || !room) return;
+
+    if (msg.t === 'i') {
+      player.input.left = !!msg.l;
+      player.input.right = !!msg.r;
+      player.input.jump = !!msg.j;
+      player.input.fire = !!msg.f;
+      return;
+    }
+
+    if (msg.t === 'ping') {
+      socket.send(JSON.stringify({ t: 'pong', c: msg.c }));
+    }
+  });
+
+  socket.on('close', () => {
+    if (!player || !room) return;
+    room.players.delete(player.id);
+    broadcast(room, { t: 'chat', m: `${player.name} 님이 퇴장했습니다.` });
+    if (room.players.size === 0) rooms.delete(room.code);
+  });
+
+  socket.on('error', () => { /* close 이벤트에서 정리된다 */ });
+});
+
+// 직접 실행할 때만 서버를 띄운다 (테스트에서는 모듈로 불러 쓴다)
+if (require.main === module) {
+  startLoop();
+  server.listen(PORT, () => {
+    console.log(`\n  🫧  보글보글 온라인 서버 실행 중`);
+    console.log(`     로컬:    http://localhost:${PORT}`);
+    for (const [name, addrs] of Object.entries(require('os').networkInterfaces())) {
+      for (const a of addrs || []) {
+        if (a.family === 'IPv4' && !a.internal) console.log(`     같은 와이파이: http://${a.address}:${PORT}  (${name})`);
+      }
+    }
+    console.log('');
+  });
+}
+
+module.exports = {
+  rooms, createRoom, createPlayer, loadLevel, stepRoom, snapshot,
+  killPlayer, fireBubble, spawnFruit, makeRoomCode
+};

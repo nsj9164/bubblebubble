@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>보글보글 온라인</title>
+<style>
+  :root {
+    --bg: #0b0620;
+    --panel: #17103a;
+    --ink: #f4f0ff;
+    --accent: #5fe07a;
+    --accent2: #5fc8ff;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; height: 100%;
+    background: radial-gradient(circle at 50% 0%, #241a55 0%, var(--bg) 70%);
+    color: var(--ink);
+    font-family: "Segoe UI", "Malgun Gothic", system-ui, sans-serif;
+    overflow: hidden;
+    -webkit-user-select: none; user-select: none;
+    touch-action: manipulation;
+  }
+  #wrap { display: flex; flex-direction: column; align-items: center; height: 100%; padding: 8px; gap: 8px; }
+
+  #hud {
+    width: 100%; max-width: 1024px;
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    font-size: 13px; letter-spacing: .5px;
+  }
+  #hud .tag {
+    background: var(--panel); border: 1px solid #3a2d7a; border-radius: 999px;
+    padding: 4px 12px; white-space: nowrap;
+  }
+  #roomTag { cursor: pointer; }
+  #roomTag b { color: var(--accent); letter-spacing: 2px; }
+  #scores { display: flex; gap: 8px; flex-wrap: wrap; margin-left: auto; }
+  .pcard {
+    background: var(--panel); border-radius: 8px; padding: 4px 10px;
+    border-left: 4px solid #888; font-variant-numeric: tabular-nums; white-space: nowrap;
+  }
+  .pcard .nm { font-weight: 700; }
+  .pcard .sc { opacity: .85; margin-left: 6px; }
+  .pcard .lv { margin-left: 6px; }
+
+  #stage { position: relative; flex: 1; display: flex; align-items: center; justify-content: center; width: 100%; }
+  canvas {
+    image-rendering: pixelated;
+    background: #000;
+    border: 3px solid #3a2d7a;
+    border-radius: 6px;
+    box-shadow: 0 0 60px rgba(95, 200, 255, .18);
+    max-width: 100%; max-height: 100%;
+  }
+
+  #toast {
+    position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%);
+    background: rgba(10, 6, 30, .85); border: 1px solid #3a2d7a; border-radius: 8px;
+    padding: 6px 14px; font-size: 13px; opacity: 0; transition: opacity .3s; pointer-events: none;
+  }
+
+  #lobby {
+    position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+    background: rgba(6, 3, 18, .93); backdrop-filter: blur(6px); z-index: 20; padding: 16px;
+  }
+  #lobby .box {
+    background: var(--panel); border: 2px solid #3a2d7a; border-radius: 16px;
+    padding: 26px; width: min(430px, 100%); box-shadow: 0 20px 60px rgba(0,0,0,.6);
+  }
+  #lobby h1 { margin: 0 0 4px; font-size: 30px; text-align: center; letter-spacing: 2px; }
+  #lobby h1 span { color: var(--accent); }
+  #lobby p.sub { margin: 0 0 20px; text-align: center; opacity: .7; font-size: 13px; }
+  label { display: block; font-size: 12px; opacity: .75; margin: 12px 0 5px; }
+  input {
+    width: 100%; padding: 11px 12px; font-size: 15px; border-radius: 8px;
+    border: 1px solid #47398f; background: #0e0a26; color: var(--ink); outline: none;
+  }
+  input:focus { border-color: var(--accent2); }
+  #code { text-transform: uppercase; letter-spacing: 6px; text-align: center; font-weight: 700; }
+  .row { display: flex; gap: 10px; margin-top: 18px; }
+  button {
+    flex: 1; padding: 12px; font-size: 15px; font-weight: 700; border-radius: 8px;
+    border: none; cursor: pointer; color: #0b0620; background: var(--accent);
+    transition: transform .08s;
+  }
+  button.alt { background: var(--accent2); }
+  button:active { transform: translateY(1px); }
+  #err { color: #ff8f8f; font-size: 13px; min-height: 18px; margin-top: 10px; text-align: center; }
+  .keys { margin-top: 18px; font-size: 12px; opacity: .65; line-height: 1.7; text-align: center; }
+  .keys kbd {
+    background: #0e0a26; border: 1px solid #47398f; border-radius: 4px;
+    padding: 1px 6px; font-family: inherit;
+  }
+
+  #touch { position: fixed; inset: auto 0 0 0; display: none; justify-content: space-between; padding: 12px; z-index: 10; }
+  #touch .side { display: flex; gap: 12px; }
+  #touch button {
+    width: 68px; height: 68px; border-radius: 50%; font-size: 20px; flex: none;
+    background: rgba(95, 200, 255, .25); color: #fff; border: 2px solid rgba(255,255,255,.35);
+  }
+  body.touch #touch { display: flex; }
+</style>
+</head>
+<body>
+  <div id="wrap">
+    <div id="hud">
+      <div class="tag" id="roomTag">방 코드 <b>----</b> · 클릭하면 초대링크 복사</div>
+      <div class="tag" id="levelTag">STAGE 1</div>
+      <div class="tag" id="pingTag">-- ms</div>
+      <div id="scores"></div>
+    </div>
+    <div id="stage">
+      <canvas id="game" width="512" height="400"></canvas>
+      <div id="toast"></div>
+    </div>
+  </div>
+
+  <div id="touch">
+    <div class="side">
+      <button data-k="left">◀</button>
+      <button data-k="right">▶</button>
+    </div>
+    <div class="side">
+      <button data-k="fire">🫧</button>
+      <button data-k="jump">▲</button>
+    </div>
+  </div>
+
+  <div id="lobby">
+    <div class="box">
+      <h1>🫧 보글<span>보글</span> 온라인</h1>
+      <p class="sub">방을 만들고 코드를 친구에게 보내세요 (최대 4명)</p>
+
+      <label for="nick">닉네임</label>
+      <input id="nick" maxlength="10" placeholder="Bub" autocomplete="off">
+
+      <label for="code">방 코드 (친구 방에 들어갈 때만)</label>
+      <input id="code" maxlength="4" placeholder="ABCD" autocomplete="off">
+
+      <div class="row">
+        <button id="createBtn">새 방 만들기</button>
+        <button id="joinBtn" class="alt">방 참가하기</button>
+      </div>
+      <div id="err"></div>
+
+      <div class="keys">
+        <kbd>←</kbd> <kbd>→</kbd> 이동 · <kbd>Space</kbd> / <kbd>↑</kbd> 점프 · <kbd>Z</kbd> / <kbd>X</kbd> 버블 발사<br>
+        적을 버블에 가둔 뒤 몸으로 부딪쳐 터뜨리세요. 연속으로 터뜨리면 점수 2배!
+      </div>
+    </div>
+  </div>
+
+  <script src="shared.js"></script>
+  <script src="game.js"></script>
+</body>
+</html>

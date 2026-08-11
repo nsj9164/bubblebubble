@@ -1,0 +1,13 @@
+{
+  "name": "bubble-bobble-online",
+  "version": "1.0.0",
+  "description": "친구와 함께 온라인으로 즐기는 보글보글 스타일 협동 게임",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test/logic.test.js && node test/network.test.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
