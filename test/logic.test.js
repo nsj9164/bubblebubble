@@ -39,6 +39,84 @@ for (let i = 0; i < S.LEVELS.length; i++) {
     `플레이어 ${p.playerSpawns.length}, 적 ${p.enemySpawns.length}`);
 }
 
+// ---- 발판 도달 가능성
+// 실제 물리로 점프/이동을 시뮬레이션해서 갈 수 있는 칸을 전부 넓혀 나간다.
+// 발판 간격이 점프 높이보다 넓으면 그 위층 적을 영영 잡을 수 없어 스테이지가 끝나지 않는다.
+function reachability(levelIndex) {
+  const lv = S.parseLevel(levelIndex);
+  const map = lv.rows;
+  const ACTIONS = [
+    { left: true }, { right: true },
+    { jump: true }, { jump: true, left: true }, { jump: true, right: true }
+  ];
+
+  const standable = (c, r) => {
+    if (c < 1 || c > S.COLS - 2 || r < 1 || r > S.ROWS - 1) return false;
+    const below = map[r][c];
+    if (below !== '#' && below !== '=') return false;
+    return map[r - 1][c] !== '#';
+  };
+  const mk = (c, r) => ({
+    x: c * S.TILE + (S.TILE - S.PW) / 2, y: r * S.TILE - S.PH,
+    vx: 0, vy: 0, w: S.PW, h: S.PH,
+    facing: 1, onGround: true, jumpHeld: false, coyote: 5, ridingId: 0
+  });
+  const spotOf = (p) => Math.floor((p.x + p.w / 2) / S.TILE) + ',' + Math.round((p.y + p.h) / S.TILE);
+  const landFrom = (x, y) => {                      // 스폰 위치에서 떨어뜨려 실제로 서는 칸
+    const p = Object.assign(mk(0, 0), { x, y, onGround: false });
+    for (let i = 0; i < 200; i++) { S.stepPlayer(p, {}, map, []); if (p.onGround) break; }
+    return spotOf(p);
+  };
+
+  const allSpots = new Set();
+  for (let r = 1; r < S.ROWS; r++) {
+    for (let c = 1; c < S.COLS - 1; c++) if (standable(c, r)) allSpots.add(c + ',' + r);
+  }
+
+  const seen = new Set(lv.playerSpawns.map((sp) => landFrom(sp.x, sp.y)));
+  const queue = [...seen];
+  while (queue.length) {
+    const [c, r] = queue.shift().split(',').map(Number);
+    for (const act of ACTIONS) {
+      const p = mk(c, r);
+      for (let i = 0; i < 90; i++) {
+        S.stepPlayer(p, act, map, []);
+        if (!p.onGround) continue;
+        const k = spotOf(p);
+        if (allSpots.has(k) && !seen.has(k)) { seen.add(k); queue.push(k); }
+      }
+    }
+  }
+
+  // 발판 조각(가로로 이어진 구간) 단위로 확인
+  const dead = [];
+  for (let r = 1; r < S.ROWS; r++) {
+    let run = null;
+    for (let c = 1; c < S.COLS - 1; c++) {
+      if (standable(c, r)) {
+        if (!run) run = { r, from: c, to: c, reached: 0 };
+        run.to = c;
+        if (seen.has(c + ',' + r)) run.reached++;
+      } else if (run) { if (!run.reached) dead.push(run); run = null; }
+    }
+    if (run && !run.reached) dead.push(run);
+  }
+
+  const unreachableEnemies = lv.enemySpawns
+    .map((sp) => landFrom(sp.x, sp.y))
+    .filter((k) => !seen.has(k));
+
+  return { dead, unreachableEnemies, reached: seen.size, total: allSpots.size };
+}
+
+for (let i = 0; i < S.LEVELS.length; i++) {
+  const { dead, unreachableEnemies, reached, total } = reachability(i);
+  check(`스테이지 ${i + 1} 모든 발판에 올라갈 수 있음`, dead.length === 0,
+    dead.length ? dead.map((d) => `row ${d.r} cols ${d.from}-${d.to}`).join(', ') : `${reached}/${total} 칸`);
+  check(`스테이지 ${i + 1} 모든 적을 잡을 수 있음`, unreachableEnemies.length === 0,
+    unreachableEnemies.length ? '못 가는 곳: ' + unreachableEnemies.join(' ') : '');
+}
+
 // ---- 스테이지 클리어와 진행
 {
   const room = freshRoom();
