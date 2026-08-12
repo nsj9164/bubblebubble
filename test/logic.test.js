@@ -176,6 +176,45 @@ for (let i = 0; i < S.LEVELS.length; i++) {
     tick(room, 40);
   }
   check('점프 10회 모두 성공', jumpOk === 10, jumpOk + '/10');
+
+  // 한 번 뛰면 항상 같은 높이여야 한다 (누른 시간이 달라도 동일)
+  const apexAfterHold = (holdTicks) => {
+    tick(room, 60);                    // 착지시켜 초기화
+    const ground = p.y;
+    let top = p.y;
+    p.input.jump = true;
+    for (let i = 0; i < 120; i++) {
+      G.stepRoom(room);
+      if (i === holdTicks) p.input.jump = false;
+      top = Math.min(top, p.y);
+      if (i > holdTicks && p.onGround) break;
+    }
+    p.input.jump = false;
+    return ground - top;
+  };
+  const tapHeight = apexAfterHold(1);      // 톡 누르기
+  const holdHeight = apexAfterHold(60);    // 꾹 누르기
+  check('점프 높이가 누른 시간과 무관하게 일정',
+    Math.abs(tapHeight - holdHeight) < 1, `톡 ${tapHeight.toFixed(1)}px / 꾹 ${holdHeight.toFixed(1)}px`);
+  check('점프 높이가 발판 간격(48px)을 넘음', tapHeight > 48 && tapHeight < 90, tapHeight.toFixed(1) + 'px');
+
+  // 꾹 누르고 있어도 착지 후 자동으로 다시 뛰면 안 된다
+  tick(room, 60);
+  p.input.jump = true;
+  tick(room, 120);                     // 계속 누른 채로 충분히 오래
+  const restingY = p.y;
+  const grounded = p.onGround;
+  tick(room, 30);
+  p.input.jump = false;
+  check('버튼을 계속 눌러도 점프는 1회뿐', grounded && Math.abs(p.y - restingY) < 0.6,
+    `y ${restingY.toFixed(1)} -> ${p.y.toFixed(1)}`);
+
+  // 눌렀다 뗀 뒤 다시 누르면 정상적으로 또 뛴다
+  tick(room, 10);
+  const y1 = p.y;
+  p.input.jump = true; tick(room, 12); p.input.jump = false;
+  check('다시 누르면 또 뛴다', p.y < y1 - 20, `y ${y1.toFixed(1)} -> ${p.y.toFixed(1)}`);
+  tick(room, 60);
 }
 
 // ---- 버블 타기

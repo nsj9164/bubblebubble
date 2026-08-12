@@ -146,12 +146,15 @@
         me.x = sp.x; me.y = sp.y; me.vx = 0; me.vy = 0;
       } else {
         var dx = sp.x - me.x, dy = sp.y - me.y;
-        if (Math.abs(dx) > 24 || Math.abs(dy) > 24) {
-          me.x = sp.x; me.y = sp.y; me.vy = 0;   // 너무 어긋나면 서버 위치로 즉시 보정
+        if (Math.abs(dx) > 64 || Math.abs(dy) > 64) {
+          me.x = sp.x; me.y = sp.y; me.vy = 0;   // 완전히 어긋났을 때만 서버 위치로 즉시 보정
         } else {
           // 지연 때문에 생기는 몇 픽셀 차이까지 매번 당기면 달릴 때 고무줄처럼 흔들린다
-          if (Math.abs(dx) > 5) me.x += dx * 0.18;
-          if (Math.abs(dy) > 5) me.y += dy * 0.18;
+          if (Math.abs(dx) > 6) me.x += dx * 0.15;
+          // 점프 중에는 서버가 나보다 지연만큼 늦게 뛰므로 y가 크게 벌어지는 게 정상이다.
+          // 여기서 y를 당기면 뛰다가 땅으로 끌려갔다 다시 솟는 것처럼 보인다.
+          // 양쪽 다 땅을 밟고 있을 때만 y를 맞춘다. (착지하면 어차피 같은 발판이라 오차가 사라진다)
+          if (me.onGround && sp.g && Math.abs(dy) > 4) me.y += dy * 0.25;
         }
       }
     }
@@ -214,10 +217,8 @@
     var k = KEYMAP[ev.code];
     if (!k) return;
     ev.preventDefault();
-    if (!input[k]) {
-      if (k === 'jump') SFX.jump();
-      if (k === 'fire') SFX.fire();
-    }
+    // 점프 소리는 실제로 뛰었을 때만 낸다 (공중에서 눌렀는데 소리만 나면 뛴 줄 안다)
+    if (!input[k] && k === 'fire') SFX.fire();
     input[k] = true;
   });
 
@@ -591,7 +592,11 @@
       if (me && phase === 'play') {
         var alive = true;
         for (var i = 0; i < srv.p.length; i++) if (srv.p[i].i === myId && (srv.p[i].d || srv.p[i].l <= 0)) alive = false;
-        if (alive) S.stepPlayer(me, input, map, srv.b);
+        if (alive) {
+          var vyBefore = me.vy;
+          S.stepPlayer(me, input, map, srv.b);
+          if (me.vy < -5 && vyBefore > -5) SFX.jump();   // 실제로 뛴 순간
+        }
       }
       stepEffects();
       sendInput();

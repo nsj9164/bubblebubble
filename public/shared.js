@@ -18,7 +18,8 @@
   var GRAVITY = 0.42;
   var MAXFALL = 7.0;
   var MOVE = 1.75;
-  var JUMP = -7.6;
+  var JUMP = -7.6;      // 점프 높이 약 69px (발판 간격 48px를 여유 있게 넘는다)
+  var COYOTE = 5;       // 발판에서 막 벗어난 직후 몇 프레임까지는 점프를 받아준다
 
   var PW = 12, PH = 14;   // 플레이어 히트박스
   var EW = 13, EH = 14;   // 적 히트박스
@@ -234,17 +235,15 @@
     else if (input.right && !input.left) { p.vx = MOVE; p.facing = 1; }
     else p.vx = 0;
 
-    // 온라인 지연에도 조작이 답답하지 않도록 코요테 타임 + 점프 선입력을 둔다
-    p.coyote = p.onGround ? 6 : Math.max(0, (p.coyote || 0) - 1);
-    p.jumpBuffer = (input.jump && !p.jumpHeld) ? 6 : Math.max(0, (p.jumpBuffer || 0) - 1);
-    if (p.jumpBuffer > 0 && p.coyote > 0) {
+    // 점프는 한 번 누르면 항상 같은 높이로 딱 한 번.
+    // 누른 시간에 따라 높이를 바꾸면(가변 점프) 온라인에서는 키를 뗀 시점이
+    // 내 화면과 서버에서 서로 달라 점프 높이가 매번 달라지고 화면이 튄다.
+    p.coyote = p.onGround ? COYOTE : Math.max(0, (p.coyote || 0) - 1);
+    if (input.jump && !p.jumpHeld && p.coyote > 0) {
       p.vy = JUMP;
-      p.jumpBuffer = 0;
-      p.coyote = 0;
+      p.coyote = 0;      // 한 번 뛰면 착지 전까지 다시 못 뛴다
       p.onGround = false;
     }
-    // 점프 버튼을 일찍 떼면 낮게 뛴다
-    if (!input.jump && p.vy < -2.2) p.vy = -2.2;
     p.jumpHeld = !!input.jump;
 
     p.vy += GRAVITY;

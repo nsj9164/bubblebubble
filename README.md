@@ -37,12 +37,37 @@ npm start
 공유기 포트포워딩(3210/TCP)도 가능하지만 위 방법이 더 간단하고 안전합니다.
 같은 와이파이인데 접속이 안 되면 Windows 방화벽에서 Node.js의 사설 네트워크 접근을 허용해 주세요.
 
+## Render 배포
+
+저장소에 [`render.yaml`](render.yaml)이 있으므로 Render의 **Blueprint** 로 만들면 설정이 자동으로 잡힙니다.
+직접 만들 때는 반드시 아래를 지켜야 합니다.
+
+| 항목 | 값 |
+| --- | --- |
+| 서비스 종류 | **Web Service** (Static Site 아님) |
+| Root Directory | **비워 둘 것** (`public` 으로 지정하면 안 됨) |
+| Build Command | `npm ci` |
+| Start Command | `npm start` |
+
+WebSocket 서버가 필요하므로 Static Site 로 만들면 동작하지 않습니다.
+
+### Not Found 가 뜰 때 확인 순서
+
+1. `https<주소>/healthz` 에 접속합니다.
+   - **JSON이 나오면** Node 서버는 정상입니다. `publicFiles` 에 `index.html`이 있는지 확인하세요.
+   - **Render의 "Not Found" 페이지가 나오면** 요청이 앱까지 오지 않은 것입니다 → Static Site 로 만들었거나 서비스가 죽어 있습니다.
+2. 파일 경로를 잘못 요청하면 앱이 `[bubble-bobble-online] 파일을 찾을 수 없습니다` 라고 답합니다.
+   이 문구가 보이면 라우팅은 정상이고 파일만 없는 것입니다.
+3. Render 대시보드의 **Logs** 에서 `보글보글 온라인 서버 실행 중` 문구가 찍혔는지 확인합니다.
+
+무료 플랜은 15분간 접속이 없으면 서비스가 잠들었다가 다음 접속 때 30초쯤 걸려 깨어납니다.
+
 ## 조작
 
 | 동작 | 키 |
 | --- | --- |
 | 이동 | `←` `→` 또는 `A` `D` |
-| 점프 | `Space` / `↑` / `W` |
+| 점프 | `Space` / `↑` / `W` (한 번 누르면 항상 같은 높이로 1회) |
 | 버블 발사 | `Z` / `X` / `Shift` / `Enter` |
 
 모바일에서는 화면 아래 터치 버튼이 나옵니다.

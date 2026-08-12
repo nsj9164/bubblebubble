@@ -1,0 +1,16 @@
+# Render 배포 설정 (Blueprint)
+# 중요: 이 게임은 WebSocket 서버가 필요하므로 반드시 "Web Service" 여야 한다.
+# "Static Site" 로 만들면 index.html 조차 찾지 못해 Not Found 가 뜨고,
+# 설령 화면이 떠도 멀티플레이가 동작하지 않는다.
+services:
+  - type: web
+    name: bubble-bobble-online
+    runtime: node
+    plan: free
+    # 저장소 루트에 package.json 이 있으므로 rootDir 은 비워 둔다 (public 으로 지정하면 안 됨)
+    buildCommand: npm ci
+    startCommand: npm start
+    healthCheckPath: /healthz
+    envVars:
+      - key: NODE_VERSION
+        value: "20"

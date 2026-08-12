@@ -25,13 +25,41 @@ const MIME = {
 
 const server = http.createServer((req, res) => {
   let urlPath = decodeURIComponent(req.url.split('?')[0]);
+
+  // 배포 진단용. 이 응답이 보이면 Node 서버는 정상적으로 떠 있는 것이다.
+  if (urlPath === '/healthz') {
+    let files = [];
+    try { files = fs.readdirSync(PUBLIC_DIR); } catch (e) { files = ['<public 폴더를 읽을 수 없음: ' + e.code + '>']; }
+    let players = 0;
+    for (const r of rooms.values()) players += r.players.size;
+    res.writeHead(200, { 'Content-Type': MIME['.json'] });
+    res.end(JSON.stringify({
+      ok: true,
+      app: 'bubble-bobble-online',
+      port: PORT,
+      uptimeSec: Math.round(process.uptime()),
+      cwd: process.cwd(),
+      publicDir: PUBLIC_DIR,
+      publicFiles: files,
+      rooms: rooms.size,
+      players
+    }, null, 2));
+    return;
+  }
+
   if (urlPath === '/' || urlPath === '') urlPath = '/index.html';
   const target = path.join(PUBLIC_DIR, path.normalize(urlPath).replace(/^[\\/]+/, ''));
   if (!target.startsWith(PUBLIC_DIR)) {
     res.writeHead(403); res.end('forbidden'); return;
   }
   fs.readFile(target, (err, data) => {
-    if (err) { res.writeHead(404); res.end('not found'); return; }
+    if (err) {
+      // Render 자체의 "Not Found" 페이지와 구분할 수 있도록 앱 이름을 함께 알린다
+      res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end(`[bubble-bobble-online] 파일을 찾을 수 없습니다: ${urlPath}\n` +
+              `이 메시지가 보인다면 Node 서버는 정상 동작 중입니다. (/healthz 로 상태 확인)\n`);
+      return;
+    }
     res.writeHead(200, { 'Content-Type': MIME[path.extname(target)] || 'application/octet-stream' });
     res.end(data);
   });
@@ -142,7 +170,7 @@ function createPlayer(room, socket, rawName) {
     color: PLAYER_COLORS[slot % PLAYER_COLORS.length],
     x: 0, y: 0, vx: 0, vy: 0, w: S.PW, h: S.PH,
     facing: 1, onGround: false, jumpHeld: false, ridingId: 0,
-    coyote: 0, jumpBuffer: 0,
+    coyote: 0,
     input: { left: false, right: false, jump: false, fire: false },
     fireHeld: false, fireCooldown: 0,
     score: 0, lives: 3, respawn: 0, invuln: INVULN_TIME
@@ -496,11 +524,15 @@ function broadcast(room, payload) {
 // ---------------------------------------------------------------- 루프
 
 const TICK_MS = 1000 / 60;
+const SNAPSHOT_EVERY = 2;   // 2틱마다 전송 = 30Hz
 
 function startLoop() {
   let lastTime = Date.now();
   let accumulator = 0;
+  let sinceBroadcast = 0;
 
+  // 타이머를 틱 간격보다 촘촘히 돌린다. 윈도우의 타이머 해상도(약 15.6ms)가
+  // 거칠어서 16.7ms 간격으로 잡으면 한 번에 2틱씩 몰려 처리되고 전송이 울컥거린다.
   setInterval(() => {
     const now = Date.now();
     accumulator += now - lastTime;
@@ -513,13 +545,16 @@ function startLoop() {
       steps++;
       for (const room of rooms.values()) stepRoom(room);
     }
+    if (steps === 0) return;
 
-    if (steps > 0) {
-      for (const room of rooms.values()) {
-        if (room.tick % 2 === 0) broadcast(room, snapshot(room));
-      }
+    // 진행한 틱 수로 세야 한다. room.tick 의 홀짝으로 판단하면 한 주기에 2틱이
+    // 처리될 때 전송이 통째로 건너뛰어져 화면이 뚝뚝 끊긴다.
+    sinceBroadcast += steps;
+    if (sinceBroadcast >= SNAPSHOT_EVERY) {
+      sinceBroadcast = 0;
+      for (const room of rooms.values()) broadcast(room, snapshot(room));
     }
-  }, TICK_MS);
+  }, Math.max(4, Math.floor(TICK_MS / 2)));
 }
 
 // ---------------------------------------------------------------- WebSocket
