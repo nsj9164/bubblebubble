@@ -17,6 +17,7 @@
   var levelTag = document.getElementById('levelTag');
   var pingTag = document.getElementById('pingTag');
   var scoresEl = document.getElementById('scores');
+  var extendEl = document.getElementById('extend');
   var toastEl = document.getElementById('toast');
 
   // ---------------------------------------------------------------- 상태
@@ -33,7 +34,7 @@
   var lastSentInput = '';
 
   // 서버 스냅샷 (최신)
-  var srv = { p: [], b: [], e: [], f: [] };
+  var srv = { p: [], b: [], e: [], f: [], lt: [], sh: [], ex: [], bs: null };
   // 화면 표시용 보간 위치: id -> {x, y}
   var view = {};
   // 내 캐릭터의 로컬 예측 상태
@@ -75,7 +76,18 @@
     kill: function () { blip(300, 0.18, 'sawtooth', 0.05, 900); },
     fruit: function () { blip(660, 0.1, 'triangle', 0.06, 1320); },
     die: function () { blip(400, 0.5, 'sawtooth', 0.06, 60); },
-    clear: function () { [523, 659, 784, 1046].forEach(function (f, i) { setTimeout(function () { blip(f, 0.16, 'square', 0.05); }, i * 110); }); }
+    clear: function () { [523, 659, 784, 1046].forEach(function (f, i) { setTimeout(function () { blip(f, 0.16, 'square', 0.05); }, i * 110); }); },
+    letter: function () { blip(880, 0.14, 'triangle', 0.06, 1760); },
+    extend: function () {
+      [523, 659, 784, 1046, 1318].forEach(function (f, i) {
+        setTimeout(function () { blip(f, 0.22, 'triangle', 0.07); }, i * 90);
+      });
+    },
+    bossDown: function () {
+      [220, 165, 110].forEach(function (f, i) {
+        setTimeout(function () { blip(f, 0.5, 'sawtooth', 0.07, f / 3); }, i * 130);
+      });
+    }
   };
 
   // ---------------------------------------------------------------- 접속
@@ -146,7 +158,9 @@
         me.x = sp.x; me.y = sp.y; me.vx = 0; me.vy = 0;
       } else {
         var dx = sp.x - me.x, dy = sp.y - me.y;
-        if (Math.abs(dx) > 64 || Math.abs(dy) > 64) {
+        if (Math.abs(dy) > S.H / 2) {
+          // 바닥 구멍으로 빠져 천장으로 나오는 중. 한쪽만 넘어간 상태라 보정하면 안 된다.
+        } else if (Math.abs(dx) > 64 || Math.abs(dy) > 64) {
           me.x = sp.x; me.y = sp.y; me.vy = 0;   // 완전히 어긋났을 때만 서버 위치로 즉시 보정
         } else {
           // 지연 때문에 생기는 몇 픽셀 차이까지 매번 당기면 달릴 때 고무줄처럼 흔들린다
@@ -167,10 +181,14 @@
       if (e.kind === 2) SFX.kill();
       else if (e.kind === 3) SFX.fruit();
       else if (e.kind === 4) SFX.die();
+      else if (e.kind === 5) SFX.bossDown();
+      else if (e.kind === 6) SFX.letter();
+      else if (e.kind === 7) { SFX.extend(); toast('EXTEND 완성! 모두 1UP 🎉'); }
       else SFX.pop();
     }
 
     updateScoreboard(m.p);
+    updateExtend(m.ex);
   }
 
   function updateScoreboard(players) {
@@ -184,6 +202,19 @@
         '<span class="lv" style="color:#ff6b8f">' + hearts + '</span></div>';
     }
     scoresEl.innerHTML = html;
+  }
+
+  var lastExtend = '';
+  function updateExtend(ex) {
+    if (!ex) return;
+    var sig = ex.join('');
+    if (sig === lastExtend) return;
+    lastExtend = sig;
+    var html = '';
+    for (var i = 0; i < S.EXTEND.length; i++) {
+      html += '<span class="ex' + (ex[i] ? ' on' : '') + '">' + S.EXTEND[i] + '</span>';
+    }
+    extendEl.innerHTML = html;
   }
 
   function escapeHtml(s) {
@@ -286,7 +317,7 @@
 
   function spawnBurst(x, y, kind) {
     var colors = ['#bfe9ff', '#ff9de0', '#ffd75f', '#8fffa8', '#ff6b8f'];
-    var n = kind === 4 ? 20 : 12;
+    var n = kind === 4 ? 20 : (kind === 5 ? 44 : (kind === 7 ? 56 : (kind === 6 ? 18 : 12)));
     for (var i = 0; i < n; i++) {
       var a = (Math.PI * 2 * i) / n + Math.random() * 0.4;
       var sp = 1 + Math.random() * 2.2;
@@ -328,7 +359,8 @@
     { wall: '#3d3070', edge: '#6a55c4', plat: '#4a3b8c', platTop: '#8f79ff' },
     { wall: '#0f4a5c', edge: '#2fa2c0', plat: '#166274', platTop: '#4ad9f5' },
     { wall: '#5c2a3d', edge: '#c05a7e', plat: '#7a3752', platTop: '#ff8fb8' },
-    { wall: '#2f5230', edge: '#5fa860', plat: '#3d6b3e', platTop: '#8fe08f' }
+    { wall: '#2f5230', edge: '#5fa860', plat: '#3d6b3e', platTop: '#8fe08f' },
+    { wall: '#4a1430', edge: '#a8305e', plat: '#5f1a3c', platTop: '#ff5f8f' }   // 보스판
   ];
 
   function tint() { return LEVEL_TINTS[level % LEVEL_TINTS.length]; }
@@ -489,6 +521,89 @@
     ctx.beginPath(); ctx.arc(x + 4, y + 5, 1.4, 0, Math.PI * 2); ctx.fill();
   }
 
+  var LETTER_COLORS = ['#ff6b8f', '#ffd75f', '#8fe08f', '#5fc8ff', '#ff9de0', '#c9a0ff'];
+  function drawLetter(x, y, idx) {
+    var ch = S.EXTEND[idx] || '?';
+    var col = LETTER_COLORS[idx % LETTER_COLORS.length];
+    var bob = Math.sin(frame * 0.12 + idx) * 1.2;
+    y += bob;
+    // 반짝이는 거품에 담긴 글자
+    ctx.fillStyle = 'rgba(255,255,255,0.18)';
+    ctx.beginPath(); ctx.arc(x + 7, y + 7, 9, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = col;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.arc(x + 7, y + 7, 9, 0, Math.PI * 2); ctx.stroke();
+    ctx.fillStyle = col;
+    ctx.font = 'bold 11px "Segoe UI", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(ch, x + 7, y + 11);
+    ctx.textAlign = 'left';
+  }
+
+  function drawShot(x, y) {
+    var r = S.SHOT_R + Math.sin(frame * 0.4 + x) * 0.8;
+    var g = ctx.createRadialGradient(x, y, 0, x, y, r * 2);
+    g.addColorStop(0, '#fff2a8');
+    g.addColorStop(0.45, '#ff9a3c');
+    g.addColorStop(1, 'rgba(255,60,20,0)');
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.arc(x, y, r * 2, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#fff6cf';
+    ctx.beginPath(); ctx.arc(x, y, r * 0.5, 0, Math.PI * 2); ctx.fill();
+  }
+
+  function drawBoss(x, y, dir, hurt) {
+    var w = S.BOSS_W, h = S.BOSS_H;
+    var body = hurt && (frame >> 1) % 2 === 0 ? '#ffffff' : '#b23a6b';
+    var dark = hurt && (frame >> 1) % 2 === 0 ? '#ffd7e6' : '#6d1f42';
+
+    // 그림자
+    ctx.fillStyle = 'rgba(0,0,0,0.25)';
+    ctx.beginPath(); ctx.ellipse(x + w / 2, y + h, w / 2, 3, 0, 0, Math.PI * 2); ctx.fill();
+
+    ctx.fillStyle = dark;
+    roundRect(x, y + 4, w, h - 4, 6); ctx.fill();
+    ctx.fillStyle = body;
+    roundRect(x + 2, y + 2, w - 4, h - 6, 6); ctx.fill();
+
+    // 뿔
+    ctx.fillStyle = '#ffd75f';
+    ctx.beginPath();
+    ctx.moveTo(x + 5, y + 3); ctx.lineTo(x + 9, y - 5); ctx.lineTo(x + 12, y + 3); ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(x + w - 12, y + 3); ctx.lineTo(x + w - 9, y - 5); ctx.lineTo(x + w - 5, y + 3); ctx.fill();
+
+    // 눈 (노려보는 방향)
+    var ox = dir > 0 ? 3 : -3;
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(x + 6 + ox, y + 8, 7, 6);
+    ctx.fillRect(x + w - 13 + ox, y + 8, 7, 6);
+    ctx.fillStyle = '#231018';
+    ctx.fillRect(x + 8 + ox, y + 10, 4, 4);
+    ctx.fillRect(x + w - 11 + ox, y + 10, 4, 4);
+
+    // 이빨
+    ctx.fillStyle = '#fff';
+    for (var i = 0; i < 4; i++) ctx.fillRect(x + 7 + i * 5, y + h - 8, 3, 4);
+  }
+
+  function drawBossHealth(bs) {
+    var barW = 220, barH = 8;
+    var x = (S.W - barW) / 2, y = 20;
+    ctx.fillStyle = 'rgba(0,0,0,0.55)';
+    ctx.fillRect(x - 3, y - 3, barW + 6, barH + 6);
+    ctx.fillStyle = '#3a2d4a';
+    ctx.fillRect(x, y, barW, barH);
+    var ratio = Math.max(0, bs.hp / bs.mx);
+    ctx.fillStyle = ratio > 0.5 ? '#5fe07a' : (ratio > 0.25 ? '#ffd75f' : '#ff5f7a');
+    ctx.fillRect(x, y, barW * ratio, barH);
+    ctx.font = 'bold 9px "Segoe UI", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#ffd7e6';
+    ctx.fillText('BOSS', S.W / 2, y - 5);
+    ctx.textAlign = 'left';
+  }
+
   function drawOverlayText() {
     if (!message) return;
     ctx.save();
@@ -516,11 +631,31 @@
       drawFruit(v.x, v.y, f.k);
     }
 
+    // EXTEND 알파벳
+    for (var li = 0; li < srv.lt.length; li++) {
+      var l = srv.lt[li];
+      var lv2 = lerpView('l' + l.i, l.x, l.y);
+      drawLetter(lv2.x, lv2.y, l.k);
+    }
+
+    // 보스
+    if (srv.bs) {
+      var bossView = lerpView('boss', srv.bs.x, srv.bs.y);
+      drawBoss(bossView.x, bossView.y, srv.bs.d, srv.bs.h);
+    }
+
     // 적
     for (var j = 0; j < srv.e.length; j++) {
       var e = srv.e[j];
       var ev = lerpView('e' + e.i, e.x, e.y);
       drawEnemyBody(ev.x, ev.y, e.t, e.d, e.a, 1);
+    }
+
+    // 보스의 불덩이
+    for (var si = 0; si < srv.sh.length; si++) {
+      var sh = srv.sh[si];
+      var sv = lerpView('s' + sh.i, sh.x, sh.y);
+      drawShot(sv.x, sv.y);
     }
 
     // 버블
@@ -566,6 +701,8 @@
       ctx.fillStyle = '#ff9de0';
       ctx.fillText('COMBO x' + srv.combo, 22, 30);
     }
+
+    if (srv.bs) drawBossHealth(srv.bs);
 
     drawOverlayText();
   }

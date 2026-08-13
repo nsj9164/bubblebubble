@@ -81,6 +81,16 @@ const RESPAWN_DELAY = 90;
 const INVULN_TIME = 150;
 const COMBO_WINDOW = 50;
 
+const LETTER_CHANCE = 0.28;   // 적을 잡았을 때 알파벳이 떨어질 확률
+const LETTER_LIFE = 780;
+const EXTEND_BONUS = 10000;
+
+const BOSS_MAX_HP = 14;
+const BOSS_SPEED = 0.75;
+const BOSS_SHOT_SPEED = 2.3;
+const BOSS_HURT_FLASH = 18;
+const BOSS_MINION_LIMIT = 4;
+
 const FRUITS = [
   { kind: 0, value: 100 }, { kind: 1, value: 200 }, { kind: 2, value: 300 },
   { kind: 3, value: 500 }, { kind: 4, value: 700 }, { kind: 5, value: 1000 }
@@ -108,6 +118,10 @@ function createRoom(code) {
     bubbles: [],
     enemies: [],
     fruits: [],
+    letters: [],       // 바닥에 떨어진 EXTEND 알파벳
+    extend: new Array(S.EXTEND.length).fill(false),
+    boss: null,
+    shots: [],         // 보스가 뱉는 불덩이
     pops: [],          // 시각 효과(터짐) 이벤트
     level: 0,
     round: 0,          // 전체 스테이지를 한 바퀴 돌 때마다 +1 (난이도 상승)
@@ -133,7 +147,11 @@ function loadLevel(room, index) {
   room.playerSpawns = parsed.playerSpawns;
   room.bubbles = [];
   room.fruits = [];
+  room.letters = [];
+  room.shots = [];
   room.enemies = parsed.enemySpawns.map((sp, i) => makeEnemy(room, sp, i));
+  room.boss = parsed.bossSpawn ? makeBoss(room, parsed.bossSpawn) : null;
+  room.isBoss = !!room.boss;
   room.combo = 0;
   room.comboTimer = 0;
 
@@ -156,6 +174,23 @@ function makeEnemy(room, spawn, i) {
     type: i % 3 === 2 ? 1 : 0, // 0: 걷는 적, 1: 잘 뛰는 적
     angry: 0,
     thinkTimer: 30 + Math.floor(Math.random() * 60)
+  };
+}
+
+function makeBoss(room, spawn) {
+  return {
+    id: room.nextId++,
+    x: spawn.x, y: spawn.y,
+    w: S.BOSS_W, h: S.BOSS_H,
+    vx: 0, vy: 0,
+    dir: 1,
+    onGround: false,
+    hp: BOSS_MAX_HP,
+    maxHp: BOSS_MAX_HP,
+    hurt: 0,
+    shootTimer: 150,
+    minionTimer: 300,
+    thinkTimer: 90
   };
 }
 
@@ -225,8 +260,11 @@ function stepRoom(room) {
 
   stepPlayers(room);
   stepEnemies(room);
+  stepBoss(room);
+  stepShots(room);
   stepBubbles(room);
   stepFruits(room);
+  stepLetters(room);
   resolveCollisions(room);
 
   if (room.comboTimer > 0 && --room.comboTimer === 0) room.combo = 0;
@@ -234,7 +272,7 @@ function stepRoom(room) {
 
   // 스테이지 클리어 판정
   const trapped = room.bubbles.some((b) => b.enemy !== null);
-  if (room.enemies.length === 0 && !trapped && room.players.size > 0) {
+  if (room.enemies.length === 0 && !trapped && !room.boss && room.players.size > 0) {
     room.phase = 'clear';
     room.phaseTimer = 150;
     room.message = 'STAGE CLEAR!';
@@ -325,7 +363,95 @@ function stepEnemies(room) {
       if (!supported && Math.random() < 0.5) e.dir *= -1;
     }
 
-    if (e.y > S.H) { e.y = S.TILE; e.vy = 0; } // 혹시라도 바닥을 빠져나가면 위에서 재등장
+    S.wrapVertical(e);   // 바닥 구멍으로 빠지면 천장에서 나온다
+  }
+}
+
+function stepBoss(room) {
+  const b = room.boss;
+  if (!b) return;
+  if (b.hurt > 0) b.hurt--;
+
+  const enraged = b.hp <= b.maxHp / 2;   // 체력 절반 아래로 떨어지면 사나워진다
+  const target = nearestPlayer(room, b);
+
+  if (--b.thinkTimer <= 0) {
+    b.thinkTimer = enraged ? 40 : 70;
+    if (target) b.dir = target.x + target.w / 2 < b.x + b.w / 2 ? -1 : 1;
+    if (b.onGround && target && Math.random() < (enraged ? 0.6 : 0.35)) b.vy = S.JUMP;
+  }
+
+  b.vx = b.dir * BOSS_SPEED * (enraged ? 1.5 : 1);
+  b.vy += S.GRAVITY;
+  if (b.vy > S.MAXFALL) b.vy = S.MAXFALL;
+
+  S.moveX(b, room.map);
+  if (b.hitWall) b.dir *= -1;
+  S.moveY(b, room.map, true);
+  S.wrapVertical(b);
+
+  // 불덩이 뱉기
+  if (--b.shootTimer <= 0) {
+    b.shootTimer = enraged ? 90 : 160;
+    if (target) {
+      const cx = b.x + b.w / 2, cy = b.y + b.h / 2;
+      const dx = target.x + target.w / 2 - cx;
+      const dy = target.y + target.h / 2 - cy;
+      const len = Math.max(1, Math.hypot(dx, dy));
+      room.shots.push({
+        id: room.nextId++,
+        x: cx, y: cy,
+        vx: (dx / len) * BOSS_SHOT_SPEED,
+        vy: (dy / len) * BOSS_SHOT_SPEED,
+        life: 0
+      });
+    }
+  }
+
+  // 부하 소환
+  if (--b.minionTimer <= 0) {
+    b.minionTimer = enraged ? 260 : 420;
+    if (room.enemies.length < BOSS_MINION_LIMIT) {
+      const e = makeEnemy(room, { x: b.x + b.w / 2 - S.EW / 2, y: b.y + b.h / 2 }, room.enemies.length);
+      e.dir = Math.random() < 0.5 ? -1 : 1;
+      room.enemies.push(e);
+      room.pops.push({ x: b.x + b.w / 2, y: b.y + b.h / 2, kind: 1 });
+    }
+  }
+}
+
+function damageBoss(room, amount, byPlayer) {
+  const b = room.boss;
+  if (!b) return;
+  b.hp -= amount;
+  b.hurt = BOSS_HURT_FLASH;
+  room.pops.push({ x: b.x + b.w / 2, y: b.y + b.h / 2, kind: 0 });
+  if (byPlayer) byPlayer.score += 50;
+
+  if (b.hp <= 0) {
+    room.pops.push({ x: b.x + b.w / 2, y: b.y + b.h / 2, kind: 5 });
+    if (byPlayer) byPlayer.score += 5000;
+    // 보스를 잡으면 과일이 쏟아진다
+    for (let i = 0; i < 6; i++) {
+      spawnFruit(room, b.x + b.w / 2 + (i - 2.5) * 12, b.y + b.h / 2);
+    }
+    spawnLetter(room, b.x + b.w / 2, b.y);
+    room.boss = null;
+    room.shots.length = 0;
+  }
+}
+
+function stepShots(room) {
+  for (let i = room.shots.length - 1; i >= 0; i--) {
+    const s = room.shots[i];
+    s.x += s.vx;
+    s.y += s.vy;
+    s.life++;
+    const c = Math.floor(s.x / S.TILE), r = Math.floor(s.y / S.TILE);
+    if (s.life > 260 || S.isSolid(room.map, c, r) || s.y < 0 || s.y > S.H) {
+      room.pops.push({ x: s.x, y: s.y, kind: 0 });
+      room.shots.splice(i, 1);
+    }
   }
 }
 
@@ -352,6 +478,14 @@ function stepBubbles(room) {
       if (S.isSolid(room.map, col, row) || b.timer >= BUBBLE_SHOT_FRAMES) {
         b.phase = 1;
         b.x = Math.max(S.TILE + S.BR, Math.min(S.W - S.TILE - S.BR, b.x));
+      }
+      // 보스는 가둘 수 없고, 버블이 터지면서 체력을 깎는다
+      if (room.boss && b.enemy === null &&
+          S.rectsOverlap(b.x - S.BR, b.y - S.BR, S.BR * 2, S.BR * 2,
+                         room.boss.x, room.boss.y, room.boss.w, room.boss.h)) {
+        damageBoss(room, 1, room.players.get(b.owner));
+        room.bubbles.splice(i, 1);
+        continue;
       }
       // 날아가는 중에만 적을 가둘 수 있다
       if (b.enemy === null) {
@@ -403,8 +537,37 @@ function stepFruits(room) {
     if (f.vy > S.MAXFALL) f.vy = S.MAXFALL;
     f.vx = 0;
     S.moveY(f, room.map, true);
+    S.wrapVertical(f);
     if (++f.life > 600) room.fruits.splice(i, 1);
   }
+}
+
+function stepLetters(room) {
+  for (let i = room.letters.length - 1; i >= 0; i--) {
+    const l = room.letters[i];
+    if (l.arm > 0) l.arm--;
+    l.vy += S.GRAVITY * 0.55;          // 알파벳은 천천히 떨어져서 눈에 잘 띈다
+    if (l.vy > 3) l.vy = 3;
+    l.vx = 0;
+    S.moveY(l, room.map, true);
+    S.wrapVertical(l);
+    if (++l.life > LETTER_LIFE) room.letters.splice(i, 1);
+  }
+}
+
+// 아직 못 모은 글자를 우선해서 떨어뜨린다 (다 모은 글자만 계속 나오면 영영 못 채운다)
+function spawnLetter(room, cx, cy) {
+  const missing = [];
+  for (let i = 0; i < room.extend.length; i++) if (!room.extend[i]) missing.push(i);
+  if (!missing.length) return;
+  const idx = missing[Math.floor(Math.random() * missing.length)];
+  room.letters.push({
+    id: room.nextId++,
+    x: cx - 7, y: cy - 7, w: 14, h: 14,
+    vx: 0, vy: -1.8,
+    onGround: false,
+    idx, life: 0, arm: 22
+  });
 }
 
 function resolveCollisions(room) {
@@ -426,6 +589,7 @@ function resolveCollisions(room) {
         const gained = 100 * Math.pow(2, room.combo - 1);
         p.score += gained;
         spawnFruit(room, b.x, b.y);
+        if (Math.random() < LETTER_CHANCE) spawnLetter(room, b.x, b.y - 10);
         room.pops.push({ x: b.x, y: b.y, kind: 2, score: gained });
       } else {
         p.score += 10;
@@ -445,16 +609,54 @@ function resolveCollisions(room) {
       }
     }
 
-    // 적과 충돌
-    if (p.invuln <= 0) {
-      for (const e of room.enemies) {
-        if (S.rectsOverlap(p.x, p.y, p.w, p.h, e.x, e.y, e.w, e.h)) {
-          killPlayer(room, p);
-          break;
-        }
+    // EXTEND 알파벳 줍기
+    for (let i = room.letters.length - 1; i >= 0; i--) {
+      const l = room.letters[i];
+      if (l.arm > 0) continue;
+      if (!S.rectsOverlap(p.x, p.y, p.w, p.h, l.x, l.y, l.w, l.h)) continue;
+      room.letters.splice(i, 1);
+      if (room.extend[l.idx]) {
+        p.score += 100;                       // 이미 모은 글자는 점수만
+        room.pops.push({ x: l.x + 7, y: l.y, kind: 3, score: 100 });
+      } else {
+        room.extend[l.idx] = true;
+        p.score += 500;
+        room.pops.push({ x: l.x + 7, y: l.y, kind: 6, letter: l.idx, score: 500 });
+        if (room.extend.every(Boolean)) completeExtend(room, p);
       }
     }
+
+    // 적 / 보스 / 불덩이와 충돌
+    if (p.invuln <= 0) {
+      let hit = false;
+      for (const e of room.enemies) {
+        if (S.rectsOverlap(p.x, p.y, p.w, p.h, e.x, e.y, e.w, e.h)) { hit = true; break; }
+      }
+      if (!hit && room.boss &&
+          S.rectsOverlap(p.x, p.y, p.w, p.h, room.boss.x, room.boss.y, room.boss.w, room.boss.h)) hit = true;
+      if (!hit) {
+        for (let i = room.shots.length - 1; i >= 0; i--) {
+          const s = room.shots[i];
+          if (S.rectsOverlap(p.x, p.y, p.w, p.h, s.x - S.SHOT_R, s.y - S.SHOT_R, S.SHOT_R * 2, S.SHOT_R * 2)) {
+            room.shots.splice(i, 1);
+            hit = true;
+            break;
+          }
+        }
+      }
+      if (hit) killPlayer(room, p);
+    }
   }
+}
+
+function completeExtend(room, p) {
+  room.extend.fill(false);
+  room.letters.length = 0;
+  p.score += EXTEND_BONUS;
+  for (const other of room.players.values()) {
+    if (other.lives > 0 && other.lives < 9) other.lives++;
+  }
+  room.pops.push({ x: S.W / 2, y: S.H / 2, kind: 7, score: EXTEND_BONUS });
 }
 
 function spawnFruit(room, cx, cy) {
@@ -510,6 +712,13 @@ function snapshot(room) {
       d: e.dir, t: e.type, a: e.angry
     })),
     f: room.fruits.map((f) => ({ i: f.id, x: Math.round(f.x), y: Math.round(f.y), k: f.kind })),
+    lt: room.letters.map((l) => ({ i: l.id, x: Math.round(l.x), y: Math.round(l.y), k: l.idx })),
+    ex: room.extend.map((v) => (v ? 1 : 0)),
+    bs: room.boss ? {
+      x: Math.round(room.boss.x * 10) / 10, y: Math.round(room.boss.y * 10) / 10,
+      d: room.boss.dir, hp: room.boss.hp, mx: room.boss.maxHp, h: room.boss.hurt > 0 ? 1 : 0
+    } : null,
+    sh: room.shots.map((s) => ({ i: s.id, x: Math.round(s.x), y: Math.round(s.y) })),
     pop: room.pops.splice(0, room.pops.length)
   };
 }
@@ -634,5 +843,6 @@ if (require.main === module) {
 
 module.exports = {
   rooms, createRoom, createPlayer, loadLevel, stepRoom, snapshot,
-  killPlayer, fireBubble, spawnFruit, makeRoomCode
+  killPlayer, fireBubble, spawnFruit, spawnLetter, makeRoomCode,
+  makeBoss, damageBoss, BOSS_MAX_HP, EXTEND_BONUS
 };

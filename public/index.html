@@ -35,6 +35,9 @@
   }
   #roomTag { cursor: pointer; }
   #roomTag b { color: var(--accent); letter-spacing: 2px; }
+  #extend { letter-spacing: 3px; font-weight: 700; }
+  #extend .ex { color: #4a3f74; transition: color .2s, text-shadow .2s; }
+  #extend .ex.on { color: var(--accent); text-shadow: 0 0 10px rgba(95, 224, 122, .8); }
   #scores { display: flex; gap: 8px; flex-wrap: wrap; margin-left: auto; }
   .pcard {
     background: var(--panel); border-radius: 8px; padding: 4px 10px;
@@ -108,6 +111,7 @@
       <div class="tag" id="roomTag">방 코드 <b>----</b> · 클릭하면 초대링크 복사</div>
       <div class="tag" id="levelTag">STAGE 1</div>
       <div class="tag" id="pingTag">-- ms</div>
+      <div class="tag" id="extend" title="적을 잡으면 가끔 알파벳이 나와요. EXTEND를 완성하면 모두 1UP!"></div>
       <div id="scores"></div>
     </div>
     <div id="stage">
