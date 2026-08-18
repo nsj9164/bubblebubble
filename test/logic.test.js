@@ -5,6 +5,7 @@
 'use strict';
 
 const path = require('path');
+const fs = require('fs');
 const G = require(path.join(__dirname, '..', 'server.js'));
 const S = require(path.join(__dirname, '..', 'public', 'shared.js'));
 const SP = require(path.join(__dirname, '..', 'public', 'sprites.js'));
@@ -47,6 +48,34 @@ for (let i = 0; i < S.LEVELS.length; i++) {
   const holes = floor.split('').filter((c) => c === '.').length;
   check(`스테이지 ${i + 1} 바닥 구멍과 천장 구멍이 맞물림`, misaligned.length === 0,
     misaligned.length ? '어긋난 열: ' + misaligned.join(',') : `구멍 ${holes}칸`);
+}
+
+// ---- 화면 연결 (getElementById 가 null 을 잡으면 조용히 망가진다)
+{
+  const pub = (f) => fs.readFileSync(path.join(__dirname, '..', 'public', f), 'utf8');
+  const html = pub('index.html');
+  const js = pub('game.js');
+
+  const ids = new Set();
+  let m;
+  const idRe = /id="([^"]+)"/g;
+  while ((m = idRe.exec(html))) ids.add(m[1]);
+
+  const used = [];
+  const useRe = /getElementById\('([^']+)'\)/g;
+  while ((m = useRe.exec(js))) used.push(m[1]);
+
+  const missing = [...new Set(used)].filter((id) => !ids.has(id));
+  check('game.js 가 찾는 요소가 index.html 에 모두 있음', missing.length === 0,
+    missing.length ? '없는 id: ' + missing.join(', ') : used.length + '개 확인');
+
+  check('투명도 슬라이더가 붙어 있음',
+    ids.has('opacity') && ids.has('opacityVal') && /id="opacity"[^>]*type="range"|type="range"[^>]*id="opacity"/.test(html) &&
+    /bb_opacity/.test(js) && /canvas\.style\.opacity/.test(js));
+
+  // 스크립트 로드 순서: shared/sprites 가 game.js 보다 먼저여야 한다
+  const order = ['shared.js', 'sprites.js', 'game.js'].map((f) => html.indexOf('src="' + f + '"'));
+  check('스크립트 로드 순서가 올바름', order.every((i) => i >= 0) && order[0] < order[2] && order[1] < order[2]);
 }
 
 // ---- 도트 스프라이트 / 폰트 데이터

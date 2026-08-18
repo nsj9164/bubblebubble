@@ -36,6 +36,24 @@
   #roomTag { cursor: pointer; }
   #roomTag b { color: var(--accent); letter-spacing: 2px; }
 
+  #opacityTag { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+  #opacityVal { min-width: 34px; text-align: right; font-variant-numeric: tabular-nums; opacity: .8; }
+  #opacity {
+    -webkit-appearance: none; appearance: none;
+    width: 92px; height: 4px; padding: 0; border: none; border-radius: 999px;
+    background: linear-gradient(90deg, #47398f, var(--accent2));
+    cursor: pointer; vertical-align: middle;
+  }
+  #opacity::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none;
+    width: 14px; height: 14px; border-radius: 50%;
+    background: var(--ink); border: 2px solid var(--accent2); cursor: pointer;
+  }
+  #opacity::-moz-range-thumb {
+    width: 14px; height: 14px; border-radius: 50%;
+    background: var(--ink); border: 2px solid var(--accent2); cursor: pointer;
+  }
+
   #stage { position: relative; flex: 1; display: flex; align-items: center; justify-content: center; width: 100%; }
   canvas {
     image-rendering: pixelated;
@@ -99,6 +117,11 @@
     <div id="hud">
       <div class="tag" id="roomTag">방 코드 <b>----</b> · 클릭하면 초대링크 복사</div>
       <div class="tag" id="pingTag">-- ms</div>
+      <label class="tag" id="opacityTag" title="게임 화면의 불투명도입니다. 브라우저 창 뒤가 비치지는 않아요.">
+        투명도
+        <input type="range" id="opacity" min="20" max="100" step="5" value="100" aria-label="게임 화면 불투명도">
+        <span id="opacityVal">100%</span>
+      </label>
     </div>
     <div id="stage">
       <canvas id="game" width="512" height="440"></canvas>

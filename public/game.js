@@ -16,6 +16,8 @@
   var roomTag = document.getElementById('roomTag');
   var pingTag = document.getElementById('pingTag');
   var toastEl = document.getElementById('toast');
+  var opacityEl = document.getElementById('opacity');
+  var opacityValEl = document.getElementById('opacityVal');
 
   var SP = window.Sprites;
   var HUD_H = 40;                    // 캔버스 위쪽 아케이드 점수판 높이
@@ -259,6 +261,12 @@
   };
 
   window.addEventListener('keydown', function (ev) {
+    // 입력칸이나 슬라이더를 만지는 중에는 게임 조작으로 가로채지 않는다
+    var tag = ev.target && ev.target.tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') {
+      if (ev.code === 'Enter' && lobby.style.display !== 'none') doJoin(codeEl.value.trim() ? codeEl.value : '');
+      return;
+    }
     if (lobby.style.display !== 'none') {
       if (ev.code === 'Enter') doJoin(codeEl.value.trim() ? codeEl.value : '');
       return;
@@ -324,6 +332,28 @@
     errEl.textContent = '';
     if (ws && ws.readyState <= 1) { try { ws.close(); } catch (e) {} }
     connect(String(code || '').toUpperCase().replace(/[^A-Z0-9]/g, ''), name);
+  }
+
+  // ---------------------------------------------------------------- 화면 투명도
+
+  // 게임 화면(캔버스)의 불투명도만 조절한다. 조작 막대는 항상 또렷하게 남겨서
+  // 아무리 흐리게 해도 슬라이더를 다시 잡을 수 있게 한다.
+  function applyOpacity(v) {
+    v = Math.max(20, Math.min(100, v | 0));
+    canvas.style.opacity = (v / 100).toFixed(2);
+    if (opacityValEl) opacityValEl.textContent = v + '%';
+    try { localStorage.setItem('bb_opacity', String(v)); } catch (e) {}
+    return v;
+  }
+
+  if (opacityEl) {
+    var saved = parseInt(localStorage.getItem('bb_opacity') || '100', 10);
+    if (!(saved >= 20 && saved <= 100)) saved = 100;
+    opacityEl.value = String(saved);
+    applyOpacity(saved);
+    opacityEl.addEventListener('input', function () { applyOpacity(parseInt(opacityEl.value, 10)); });
+    // 슬라이더에 포커스가 남아 있으면 방향키가 게임이 아니라 슬라이더로 간다
+    opacityEl.addEventListener('change', function () { opacityEl.blur(); });
   }
 
   nickEl.value = localStorage.getItem('bb_nick') || '';
