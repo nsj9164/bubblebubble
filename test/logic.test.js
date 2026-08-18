@@ -7,6 +7,7 @@
 const path = require('path');
 const G = require(path.join(__dirname, '..', 'server.js'));
 const S = require(path.join(__dirname, '..', 'public', 'shared.js'));
+const SP = require(path.join(__dirname, '..', 'public', 'sprites.js'));
 
 const results = [];
 function check(label, cond, extra) {
@@ -46,6 +47,42 @@ for (let i = 0; i < S.LEVELS.length; i++) {
   const holes = floor.split('').filter((c) => c === '.').length;
   check(`스테이지 ${i + 1} 바닥 구멍과 천장 구멍이 맞물림`, misaligned.length === 0,
     misaligned.length ? '어긋난 열: ' + misaligned.join(',') : `구멍 ${holes}칸`);
+}
+
+// ---- 도트 스프라이트 / 폰트 데이터
+// 한 줄이라도 길이가 어긋나면 캐릭터가 잘려 보인다. 눈으로 알아채기 어려우니 검사한다.
+{
+  const PALETTE_KEYS = '.oBDLweyrgkcm';
+  const bad = [];
+  const checkSprite = (name, sp, size) => {
+    if (sp.length !== size) bad.push(`${name}: 줄 수 ${sp.length}(기대 ${size})`);
+    sp.forEach((row, i) => {
+      if (row.length !== size) bad.push(`${name} ${i}번째 줄 길이 ${row.length}(기대 ${size})`);
+      for (const ch of row) if (PALETTE_KEYS.indexOf(ch) < 0) bad.push(`${name} ${i}번째 줄에 알 수 없는 색 '${ch}'`);
+    });
+  };
+  checkSprite('BUB', SP.BUB, 16);
+  SP.ENEMY_SPRITES.forEach((sp, i) => checkSprite('적' + i, sp, 16));
+  SP.FRUITS.forEach((f, i) => checkSprite('과일' + i, f, 12));
+  check('스프라이트 도트가 온전함', bad.length === 0, bad.slice(0, 3).join(' / '));
+
+  check('적 종류마다 스프라이트와 팔레트가 있음',
+    SP.ENEMY_SPRITES.length === 3 && SP.ENEMY_KEYS.length === 3 &&
+    SP.ENEMY_KEYS.every((k) => !!SP.ENEMY_PALETTES[k]), SP.ENEMY_KEYS.join(', '));
+
+  const fontBad = [];
+  for (const ch of Object.keys(SP.FONT)) {
+    const rows = SP.FONT[ch].split('/');
+    if (rows.length !== 7) fontBad.push(`'${ch}' 줄 수 ${rows.length}`);
+    for (const r of rows) if (r.length !== 5 || /[^01]/.test(r)) fontBad.push(`'${ch}' 줄 "${r}"`);
+  }
+  check('비트맵 폰트가 5x7 규격', fontBad.length === 0, fontBad.slice(0, 3).join(' / '));
+
+  // 화면에 실제로 찍는 글자가 폰트에 다 있어야 한다
+  const used = ('1UP 2UP 3UP 4UP HIGH SCORE STAGE BOSS COMBO X GET READY TRY AGAIN ' +
+                S.EXTEND + '0123456789').split('');
+  const missing = [...new Set(used)].filter((c) => !SP.FONT[c.toUpperCase()]);
+  check('HUD에 쓰는 글자가 폰트에 모두 있음', missing.length === 0, missing.join(''));
 }
 
 // ---- 발판 도달 가능성
@@ -408,7 +445,9 @@ for (let i = 0; i < S.LEVELS.length; i++) {
   check('이미 모은 글자는 다시 안 나옴', onlyMissing);
 
   // 마지막 한 글자를 채우면 EXTEND 완성
+  // 앞에서 주운 글자가 무엇이었든 상관없도록 여기서 상태를 명확히 다시 만든다
   room.letters.length = 0;
+  room.extend.fill(false);
   for (let i = 0; i < room.extend.length - 1; i++) room.extend[i] = true;
   const lastIdx = room.extend.findIndex((v) => !v);
   G.spawnLetter(room, 200, 200);

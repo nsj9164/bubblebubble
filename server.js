@@ -101,6 +101,9 @@ const FRUITS = [
 /** @type {Map<string, object>} */
 const rooms = new Map();
 
+// 아케이드 기판처럼 서버가 켜져 있는 동안의 최고 점수를 모두가 공유한다
+let highScore = 30000;
+
 function makeRoomCode() {
   const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   let code;
@@ -171,7 +174,7 @@ function makeEnemy(room, spawn, i) {
     vx: 0, vy: 0,
     dir: i % 2 === 0 ? 1 : -1,
     onGround: false,
-    type: i % 3 === 2 ? 1 : 0, // 0: 걷는 적, 1: 잘 뛰는 적
+    type: i % 3,   // 0 젠짱(기본), 1 마이타(잘 뛴다), 2 몬스타(빠르다)
     angry: 0,
     thinkTimer: 30 + Math.floor(Math.random() * 60)
   };
@@ -267,6 +270,8 @@ function stepRoom(room) {
   stepLetters(room);
   resolveCollisions(room);
 
+  for (const p of room.players.values()) if (p.score > highScore) highScore = p.score;
+
   if (room.comboTimer > 0 && --room.comboTimer === 0) room.combo = 0;
   if (room.pops.length > 24) room.pops.length = 24;
 
@@ -345,7 +350,7 @@ function stepEnemies(room) {
       }
     }
 
-    e.vx = e.dir * speed * (e.angry ? 1.7 : 1);
+    e.vx = e.dir * speed * (e.angry ? 1.7 : 1) * (e.type === 2 ? 1.3 : 1);
     e.vy += S.GRAVITY;
     if (e.vy > S.MAXFALL) e.vy = S.MAXFALL;
 
@@ -702,9 +707,10 @@ function snapshot(room) {
     msg: room.message,
     combo: room.combo,
     p: players,
+    hs: highScore,
     b: room.bubbles.map((b) => ({
       i: b.id, x: Math.round(b.x * 10) / 10, y: Math.round(b.y * 10) / 10,
-      e: b.enemy === null ? -1 : b.enemy, ph: b.phase,
+      e: b.enemy === null ? -1 : b.enemy, ph: b.phase, o: b.owner,
       w: b.enemy !== null && b.trapTimer < 90 ? 1 : 0
     })),
     e: room.enemies.map((e) => ({

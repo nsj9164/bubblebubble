@@ -68,7 +68,8 @@ let server;
   await wait(1200);
 
   // ---- 정적 파일 서빙
-  for (const [p, type] of [['/', 'text/html'], ['/game.js', 'text/javascript'], ['/shared.js', 'text/javascript']]) {
+  for (const [p, type] of [['/', 'text/html'], ['/game.js', 'text/javascript'],
+                           ['/shared.js', 'text/javascript'], ['/sprites.js', 'text/javascript']]) {
     const r = await get(p);
     check('정적 파일 응답 ' + p, r.status === 200 && r.type.startsWith(type) && r.len > 0, `${r.status}, ${r.len} bytes`);
   }
@@ -133,21 +134,31 @@ let server;
 
   // 점프 높이가 매번 같은가 (가변 점프였다면 지연 때문에 들쭉날쭉해진다)
   const heights = [];
-  for (let n = 0; n < 3 && heights.length < 3; n++) {
+  for (let n = 0; n < 10 && heights.length < 3; n++) {
     await wait(800);
     const before = a.self();
-    if (before.d || before.l <= 0) continue;
+    if (before.d || before.l <= 0) continue;      // 부활 대기 중이면 다시 시도
     a.input({ j: true }); await wait(60); a.input({});
-    let top = before.y;
-    for (let i = 0; i < 12; i++) { await wait(50); top = Math.min(top, a.self().y); }
-    heights.push(Math.round(before.y - top));
+    let top = before.y, died = false;
+    for (let i = 0; i < 12; i++) {
+      await wait(50);
+      const s = a.self();
+      if (s.d) { died = true; break; }            // 뛰는 도중에 맞았으면 표본에서 뺀다
+      top = Math.min(top, s.y);
+    }
+    if (!died) heights.push(Math.round(before.y - top));
   }
   const spread = Math.max(...heights) - Math.min(...heights);
   check('점프 높이가 매번 일정', heights.length === 3 && spread <= 4, heights.join(' / ') + ' px');
 
   // ---- 버블 발사
-  a.input({ f: true }); await wait(120); a.input({}); await wait(150);
-  check('버블 발사가 서버에 반영됨', a.last().b.length > 0, a.last().b.length + '개');
+  let fired = 0;
+  for (let n = 0; n < 8 && fired === 0; n++) {
+    if (a.self().d || a.self().l <= 0) { await wait(400); continue; }   // 부활 대기 중이면 다시 시도
+    a.input({ f: true }); await wait(120); a.input({}); await wait(150);
+    fired = a.last().b.length;
+  }
+  check('버블 발사가 서버에 반영됨', fired > 0, fired + '개');
   const oldBubbles = new Set(a.last().b.map((x) => x.i));
 
   // ---- 양방향 동기화

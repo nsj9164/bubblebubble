@@ -14,11 +14,12 @@
   var nickEl = document.getElementById('nick');
   var codeEl = document.getElementById('code');
   var roomTag = document.getElementById('roomTag');
-  var levelTag = document.getElementById('levelTag');
   var pingTag = document.getElementById('pingTag');
-  var scoresEl = document.getElementById('scores');
-  var extendEl = document.getElementById('extend');
   var toastEl = document.getElementById('toast');
+
+  var SP = window.Sprites;
+  var HUD_H = 40;                    // 캔버스 위쪽 아케이드 점수판 높이
+  var VIEW_H = S.H + HUD_H;
 
   // ---------------------------------------------------------------- 상태
 
@@ -42,9 +43,60 @@
 
   var particles = [];
   var floaters = [];
-  var stars = [];
-  for (var i = 0; i < 60; i++) {
-    stars.push({ x: Math.random() * S.W, y: Math.random() * S.H, s: Math.random() * 1.6 + 0.4, a: Math.random() });
+
+  // ---------------------------------------------------------------- 도트 스프라이트
+
+  // 픽셀을 매 프레임 찍으면 느리다. 팔레트/방향별로 한 번만 그려서 캐시해 둔다.
+  var spriteCache = {};
+  function bakeSprite(key, rows, palette, flip) {
+    var id = key + (flip ? '|L' : '|R');
+    if (spriteCache[id]) return spriteCache[id];
+    var size = rows.length;
+    var cv = document.createElement('canvas');
+    cv.width = size; cv.height = size;
+    var c = cv.getContext('2d');
+    for (var r = 0; r < size; r++) {
+      var line = flip ? rows[r].split('').reverse().join('') : rows[r];
+      for (var x = 0; x < line.length; x++) {
+        var col = palette[line[x]];
+        if (!col) continue;
+        c.fillStyle = col;
+        c.fillRect(x, r, 1, 1);
+      }
+    }
+    spriteCache[id] = cv;
+    return cv;
+  }
+
+  function drawSprite(cv, cx, bottom) {   // 발끝(bottom) 기준으로 가운데 정렬
+    ctx.drawImage(cv, Math.round(cx - cv.width / 2), Math.round(bottom - cv.height));
+  }
+
+  // ---------------------------------------------------------------- 비트맵 글씨
+
+  function drawText(text, x, y, color, scale) {
+    scale = scale || 1;
+    ctx.fillStyle = color;
+    var cx = x;
+    for (var i = 0; i < text.length; i++) {
+      var g = SP.FONT[text.charAt(i).toUpperCase()];
+      if (g) {
+        var rows = g.split('/');
+        for (var r = 0; r < 7; r++) {
+          for (var c = 0; c < 5; c++) {
+            if (rows[r].charAt(c) === '1') ctx.fillRect(cx + c * scale, y + r * scale, scale, scale);
+          }
+        }
+      }
+      cx += 6 * scale;
+    }
+    return cx;
+  }
+  function textW(text, scale) { return text.length * 6 * (scale || 1) - (scale || 1); }
+  function pad(n, len) {
+    var s = String(n);
+    while (s.length < len) s = '0' + s;
+    return s;
   }
 
   // ---------------------------------------------------------------- 사운드
@@ -138,7 +190,7 @@
     if (m.lv !== level) {
       level = m.lv;
       map = S.parseLevel(level).rows;
-      levelTag.textContent = 'STAGE ' + (level + 1);
+      renderMapCanvas();
     }
     if (phase !== m.ph && m.ph === 'clear') SFX.clear();
     phase = m.ph;
@@ -187,40 +239,6 @@
       else SFX.pop();
     }
 
-    updateScoreboard(m.p);
-    updateExtend(m.ex);
-  }
-
-  function updateScoreboard(players) {
-    var html = '';
-    for (var i = 0; i < players.length; i++) {
-      var p = players[i];
-      var hearts = p.l > 0 ? new Array(p.l + 1).join('♥') : '－';
-      html += '<div class="pcard" style="border-left-color:' + p.c + '">' +
-        '<span class="nm" style="color:' + p.c + '">' + escapeHtml(p.n) + (p.i === myId ? ' (나)' : '') + '</span>' +
-        '<span class="sc">' + p.s + '</span>' +
-        '<span class="lv" style="color:#ff6b8f">' + hearts + '</span></div>';
-    }
-    scoresEl.innerHTML = html;
-  }
-
-  var lastExtend = '';
-  function updateExtend(ex) {
-    if (!ex) return;
-    var sig = ex.join('');
-    if (sig === lastExtend) return;
-    lastExtend = sig;
-    var html = '';
-    for (var i = 0; i < S.EXTEND.length; i++) {
-      html += '<span class="ex' + (ex[i] ? ' on' : '') + '">' + S.EXTEND[i] + '</span>';
-    }
-    extendEl.innerHTML = html;
-  }
-
-  function escapeHtml(s) {
-    return String(s).replace(/[&<>"']/g, function (c) {
-      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
-    });
   }
 
   var toastTimer = null;
@@ -355,150 +373,154 @@
 
   // ---------------------------------------------------------------- 렌더
 
-  var LEVEL_TINTS = [
-    { wall: '#3d3070', edge: '#6a55c4', plat: '#4a3b8c', platTop: '#8f79ff' },
-    { wall: '#0f4a5c', edge: '#2fa2c0', plat: '#166274', platTop: '#4ad9f5' },
-    { wall: '#5c2a3d', edge: '#c05a7e', plat: '#7a3752', platTop: '#ff8fb8' },
-    { wall: '#2f5230', edge: '#5fa860', plat: '#3d6b3e', platTop: '#8fe08f' },
-    { wall: '#4a1430', edge: '#a8305e', plat: '#5f1a3c', platTop: '#ff5f8f' }   // 보스판
+  // 스테이지별 블록 스타일. brick 은 입체 벽돌, stripe 는 대각 줄무늬(원작 핑크 판).
+  var TILE_STYLES = [
+    { kind: 'brick',  base: '#3f3a8c', light: '#8f86ff', dark: '#201c52', seam: '#2a2668' },
+    { kind: 'stripe', base: '#8c1f5a', light: '#ff7fc0', dark: '#5a0f38', seam: '#ff9fd0' },
+    { kind: 'brick',  base: '#1f6b5a', light: '#6fe0c0', dark: '#0e3a30', seam: '#164f43' },
+    { kind: 'brick',  base: '#7a4a10', light: '#ffc46b', dark: '#4a2a06', seam: '#5e380c' },
+    { kind: 'brick',  base: '#7a1030', light: '#ff5f8f', dark: '#4a0618', seam: '#5e0a22' }
   ];
+  function style() { return TILE_STYLES[level % TILE_STYLES.length]; }
 
-  function tint() { return LEVEL_TINTS[level % LEVEL_TINTS.length]; }
+  // 16x16 타일을 한 번만 그려서 캐시한다
+  var tileCache = {};
+  function makeTile(styleIndex, kind) {
+    var id = styleIndex + '|' + kind;
+    if (tileCache[id]) return tileCache[id];
+    var st = TILE_STYLES[styleIndex];
+    var T = S.TILE;
+    var cv = document.createElement('canvas');
+    cv.width = T; cv.height = T;
+    var c = cv.getContext('2d');
 
-  function drawBackground() {
-    var t = tint();
-    var g = ctx.createLinearGradient(0, 0, 0, S.H);
-    g.addColorStop(0, '#0a0620');
-    g.addColorStop(1, '#140b30');
-    ctx.fillStyle = g;
-    ctx.fillRect(0, 0, S.W, S.H);
-
-    for (var i = 0; i < stars.length; i++) {
-      var s = stars[i];
-      ctx.globalAlpha = 0.25 + Math.abs(Math.sin(frame * 0.02 + s.a * 9)) * 0.5;
-      ctx.fillStyle = '#9fd8ff';
-      ctx.fillRect(s.x | 0, s.y | 0, s.s, s.s);
+    if (st.kind === 'stripe') {
+      c.fillStyle = st.base;
+      c.fillRect(0, 0, T, T);
+      c.fillStyle = st.light;
+      for (var y = 0; y < T; y++) {
+        for (var x = 0; x < T; x++) {
+          if (((x + y) % 8) < 4) c.fillRect(x, y, 1, 1);
+        }
+      }
+      c.fillStyle = st.dark;
+      c.fillRect(0, T - 2, T, 2);
+      c.fillRect(0, 0, T, 1);
+    } else {
+      c.fillStyle = st.base;
+      c.fillRect(0, 0, T, T);
+      // 벽돌 이음새
+      c.fillStyle = st.seam;
+      c.fillRect(0, 7, T, 2);
+      c.fillRect(3, 0, 2, 7);
+      c.fillRect(11, 9, 2, 7);
+      // 입체감
+      c.fillStyle = st.light;
+      c.fillRect(0, 0, T, 2);
+      c.fillRect(0, 0, 2, T);
+      c.fillRect(0, 9, T, 2);
+      c.fillStyle = st.dark;
+      c.fillRect(0, T - 2, T, 2);
+      c.fillRect(T - 2, 0, 2, T);
     }
-    ctx.globalAlpha = 1;
 
-    // 은은한 배경 격자
-    ctx.strokeStyle = 'rgba(255,255,255,0.03)';
-    ctx.lineWidth = 1;
-    for (var x = 0; x < S.W; x += S.TILE * 2) {
-      ctx.beginPath(); ctx.moveTo(x + .5, 0); ctx.lineTo(x + .5, S.H); ctx.stroke();
+    if (kind === 'plat') {   // 발판은 윗면을 밝게 해서 밟는 자리가 또렷하게 보이게
+      c.fillStyle = st.light;
+      c.fillRect(0, 0, T, 3);
     }
-    void t;
+    tileCache[id] = cv;
+    return cv;
   }
 
-  function drawMap() {
-    var t = tint();
+  // 맵은 움직이지 않으므로 스테이지가 바뀔 때 한 장으로 미리 그려 둔다
+  var mapCanvas = document.createElement('canvas');
+  mapCanvas.width = S.W; mapCanvas.height = S.H;
+  function renderMapCanvas() {
+    var mc = mapCanvas.getContext('2d');
+    var si = level % TILE_STYLES.length;
+    mc.clearRect(0, 0, S.W, S.H);
     for (var r = 0; r < S.ROWS; r++) {
       for (var c = 0; c < S.COLS; c++) {
         var ch = map[r][c];
-        var x = c * S.TILE, y = r * S.TILE;
-        if (ch === '#') {
-          ctx.fillStyle = t.wall;
-          ctx.fillRect(x, y, S.TILE, S.TILE);
-          ctx.fillStyle = t.edge;
-          ctx.fillRect(x, y, S.TILE, 2);
-          ctx.fillRect(x, y, 2, S.TILE);
-          ctx.fillStyle = 'rgba(0,0,0,0.25)';
-          ctx.fillRect(x + S.TILE - 2, y + 2, 2, S.TILE - 2);
-          ctx.fillRect(x + 2, y + S.TILE - 2, S.TILE - 4, 2);
-        } else if (ch === '=') {
-          ctx.fillStyle = t.plat;
-          ctx.fillRect(x, y, S.TILE, S.TILE);
-          ctx.fillStyle = t.platTop;
-          ctx.fillRect(x, y, S.TILE, 3);
-          ctx.fillStyle = 'rgba(0,0,0,0.3)';
-          ctx.fillRect(x, y + S.TILE - 3, S.TILE, 3);
-        }
+        if (ch === '#') mc.drawImage(makeTile(si, 'wall'), c * S.TILE, r * S.TILE);
+        else if (ch === '=') mc.drawImage(makeTile(si, 'plat'), c * S.TILE, r * S.TILE);
       }
     }
   }
 
-  function drawBubble(x, y, enemyType, warning) {
+  // 버블은 쏜 사람 색으로 물든다 (원작에서 법과 밥의 버블 색이 다르다)
+  function bubbleColor(ownerId) {
+    for (var i = 0; i < srv.p.length; i++) if (srv.p[i].i === ownerId) return srv.p[i].c;
+    return '#8fe0ff';
+  }
+
+  function rgba(hex, a) {
+    var n = parseInt(hex.slice(1), 16);
+    return 'rgba(' + ((n >> 16) & 255) + ',' + ((n >> 8) & 255) + ',' + (n & 255) + ',' + a + ')';
+  }
+
+  function drawBubble(x, y, enemyType, warning, ownerId) {
     var r = S.BR;
     var pulse = Math.sin(frame * 0.12 + x * 0.1) * 0.6;
+    var col = enemyType >= 0 ? '#ff8fd0' : bubbleColor(ownerId);
 
-    if (enemyType >= 0) {
-      ctx.fillStyle = warning && (frame >> 2) % 2 === 0 ? 'rgba(255,120,120,0.55)' : 'rgba(160,230,255,0.35)';
-    } else {
-      ctx.fillStyle = 'rgba(190,240,255,0.22)';
-    }
+    ctx.fillStyle = rgba(col, 0.28);
     ctx.beginPath(); ctx.arc(x, y, r + pulse, 0, Math.PI * 2); ctx.fill();
 
-    ctx.strokeStyle = enemyType >= 0 ? '#ff9de0' : '#bfeaff';
-    ctx.lineWidth = 1.5;
+    if (enemyType >= 0) {
+      var sp = SP.ENEMY_SPRITES[enemyType % SP.ENEMY_SPRITES.length];
+      var pal = SP.ENEMY_PALETTES[SP.ENEMY_KEYS[enemyType % SP.ENEMY_KEYS.length]];
+      var baked = bakeSprite('e' + enemyType, sp, pal, false);
+      ctx.save();
+      ctx.globalAlpha = 0.9;
+      ctx.drawImage(baked, 0, 0, baked.width, baked.height,
+        Math.round(x - 6), Math.round(y - 6), 12, 12);
+      ctx.restore();
+    }
+
+    ctx.strokeStyle = warning && (frame >> 2) % 2 === 0 ? '#ffffff' : col;
+    ctx.lineWidth = 2;
     ctx.beginPath(); ctx.arc(x, y, r + pulse, 0, Math.PI * 2); ctx.stroke();
 
-    if (enemyType >= 0) drawEnemyBody(x - S.EW / 2, y - S.EH / 2 + 1, enemyType, 0, 0, 0.75);
-
-    ctx.fillStyle = 'rgba(255,255,255,0.75)';
-    ctx.beginPath(); ctx.arc(x - r * 0.35, y - r * 0.4, 1.8, 0, Math.PI * 2); ctx.fill();
+    // 반짝임
+    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+    ctx.fillRect(Math.round(x - r * 0.45), Math.round(y - r * 0.55), 2, 2);
   }
 
-  function drawEnemyBody(x, y, type, dir, angry, scale) {
-    scale = scale || 1;
-    var w = S.EW * scale, h = S.EH * scale;
-    var body = angry ? '#ff5f7a' : (type === 1 ? '#ffb14d' : '#7f8fff');
-    var dark = angry ? '#b02a45' : (type === 1 ? '#b06a1d' : '#4550b0');
-
-    ctx.fillStyle = dark;
-    ctx.fillRect(x, y + h * 0.25, w, h * 0.75);
-    ctx.fillStyle = body;
-    ctx.fillRect(x + 1, y + h * 0.2, w - 2, h * 0.7);
-    // 뿔/머리
-    ctx.fillRect(x + 2, y, w - 4, h * 0.3);
-    // 눈
-    ctx.fillStyle = '#fff';
-    var ex = dir < 0 ? x + 2 : x + w - 6;
-    ctx.fillRect(ex, y + h * 0.28, 4 * scale, 4 * scale);
-    ctx.fillStyle = '#111';
-    ctx.fillRect(ex + (dir < 0 ? 0 : 2 * scale), y + h * 0.32, 2 * scale, 2.5 * scale);
-    // 발
-    ctx.fillStyle = dark;
-    ctx.fillRect(x, y + h - 2, 4 * scale, 2 * scale);
-    ctx.fillRect(x + w - 4 * scale, y + h - 2, 4 * scale, 2 * scale);
+  function drawEnemy(cx, bottom, type, dir, angry) {
+    var idx = type % SP.ENEMY_SPRITES.length;
+    var pal = angry ? SP.ANGRY_PALETTE : SP.ENEMY_PALETTES[SP.ENEMY_KEYS[idx]];
+    var key = 'enemy' + idx + (angry ? 'A' : '');
+    drawSprite(bakeSprite(key, SP.ENEMY_SPRITES[idx], pal, dir < 0), cx, bottom);
   }
 
-  function drawPlayer(x, y, color, facing, moving, ghost, name, isMe) {
+  // 플레이어 색마다 밝은/어두운 톤을 만들어 등껍질 음영에 쓴다
+  function shade(hex, amount) {
+    var n = parseInt(hex.slice(1), 16);
+    var r = Math.max(0, Math.min(255, ((n >> 16) & 255) + amount));
+    var g = Math.max(0, Math.min(255, ((n >> 8) & 255) + amount));
+    var b = Math.max(0, Math.min(255, (n & 255) + amount));
+    return '#' + ((1 << 24) | (r << 16) | (g << 8) | b).toString(16).slice(1);
+  }
+
+  function drawPlayer(cx, bottom, color, facing, moving, ghost, name, isMe) {
     ctx.save();
-    if (ghost && (frame >> 2) % 2 === 0) ctx.globalAlpha = 0.35;
-
-    var w = S.PW, h = S.PH;
-    var bob = moving ? Math.sin(frame * 0.35) * 1 : 0;
-    y += bob;
-
-    // 몸통
-    ctx.fillStyle = color;
-    roundRect(x, y + 2, w, h - 2, 4);
-    ctx.fill();
-    // 배
-    ctx.fillStyle = 'rgba(255,255,255,0.35)';
-    roundRect(x + 3, y + 6, w - 6, h - 7, 3);
-    ctx.fill();
-    // 등껍질 무늬
-    ctx.fillStyle = 'rgba(0,0,0,0.18)';
-    ctx.fillRect(x + (facing > 0 ? 1 : w - 5), y + 4, 4, 4);
-    // 눈
-    ctx.fillStyle = '#fff';
-    var ex = facing > 0 ? x + w - 6 : x + 2;
-    ctx.fillRect(ex, y + 3, 4, 4);
-    ctx.fillStyle = '#111';
-    ctx.fillRect(ex + (facing > 0 ? 2 : 0), y + 4, 2, 3);
-    // 발
-    ctx.fillStyle = '#ffd75f';
-    ctx.fillRect(x + 1, y + h - 1, 4, 2);
-    ctx.fillRect(x + w - 5, y + h - 1, 4, 2);
+    if (ghost && (frame >> 2) % 2 === 0) ctx.globalAlpha = 0.4;
+    var bob = moving ? Math.sin(frame * 0.3) : 0;
+    var pal = SP.playerPalette(color, shade(color, 70), shade(color, -80));
+    drawSprite(bakeSprite('bub' + color, SP.BUB, pal, facing < 0), cx, bottom + bob);
     ctx.restore();
 
-    // 이름표
-    ctx.font = '7px "Segoe UI", sans-serif';
-    ctx.textAlign = 'center';
-    ctx.fillStyle = isMe ? '#ffffff' : 'rgba(255,255,255,0.7)';
-    ctx.fillText(name, x + w / 2, y - 3);
-    ctx.textAlign = 'left';
+    if (name) {
+      var w = textW(name, 1);
+      drawText(name, Math.round(cx - w / 2), Math.round(bottom - 24), isMe ? '#ffffff' : 'rgba(255,255,255,0.65)', 1);
+    }
+  }
+
+  function drawFruit(x, y, kind) {
+    var idx = kind % SP.FRUITS.length;
+    var baked = bakeSprite('fruit' + idx, SP.FRUITS[idx], SP.FRUIT_PALETTE, false);
+    ctx.drawImage(baked, Math.round(x), Math.round(y));
   }
 
   function roundRect(x, y, w, h, r) {
@@ -511,33 +533,19 @@
     ctx.closePath();
   }
 
-  var FRUIT_COLORS = ['#ff5f7a', '#ffd75f', '#8fe08f', '#5fc8ff', '#ff9de0', '#ffffff'];
-  function drawFruit(x, y, kind) {
-    ctx.fillStyle = FRUIT_COLORS[kind % FRUIT_COLORS.length];
-    ctx.beginPath(); ctx.arc(x + 6, y + 7, 5, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = '#6fdc6f';
-    ctx.fillRect(x + 5, y, 2, 3);
-    ctx.fillStyle = 'rgba(255,255,255,0.6)';
-    ctx.beginPath(); ctx.arc(x + 4, y + 5, 1.4, 0, Math.PI * 2); ctx.fill();
-  }
-
   var LETTER_COLORS = ['#ff6b8f', '#ffd75f', '#8fe08f', '#5fc8ff', '#ff9de0', '#c9a0ff'];
   function drawLetter(x, y, idx) {
-    var ch = S.EXTEND[idx] || '?';
+    var ch = S.EXTEND.charAt(idx) || '?';
     var col = LETTER_COLORS[idx % LETTER_COLORS.length];
     var bob = Math.sin(frame * 0.12 + idx) * 1.2;
     y += bob;
     // 반짝이는 거품에 담긴 글자
-    ctx.fillStyle = 'rgba(255,255,255,0.18)';
+    ctx.fillStyle = 'rgba(255,255,255,0.16)';
     ctx.beginPath(); ctx.arc(x + 7, y + 7, 9, 0, Math.PI * 2); ctx.fill();
     ctx.strokeStyle = col;
-    ctx.lineWidth = 1.5;
+    ctx.lineWidth = 2;
     ctx.beginPath(); ctx.arc(x + 7, y + 7, 9, 0, Math.PI * 2); ctx.stroke();
-    ctx.fillStyle = col;
-    ctx.font = 'bold 11px "Segoe UI", sans-serif';
-    ctx.textAlign = 'center';
-    ctx.fillText(ch, x + 7, y + 11);
-    ctx.textAlign = 'left';
+    drawText(ch, Math.round(x + 4), Math.round(y + 3), col, 1);
   }
 
   function drawShot(x, y) {
@@ -597,32 +605,93 @@
     var ratio = Math.max(0, bs.hp / bs.mx);
     ctx.fillStyle = ratio > 0.5 ? '#5fe07a' : (ratio > 0.25 ? '#ffd75f' : '#ff5f7a');
     ctx.fillRect(x, y, barW * ratio, barH);
-    ctx.font = 'bold 9px "Segoe UI", sans-serif';
-    ctx.textAlign = 'center';
-    ctx.fillStyle = '#ffd7e6';
-    ctx.fillText('BOSS', S.W / 2, y - 5);
-    ctx.textAlign = 'left';
+    drawText('BOSS', Math.round(S.W / 2 - textW('BOSS', 1) / 2), y - 11, '#ffd7e6', 1);
   }
 
   function drawOverlayText() {
     if (!message) return;
-    ctx.save();
-    ctx.textAlign = 'center';
-    ctx.font = 'bold 26px "Segoe UI", sans-serif';
-    var y = S.H / 2;
-    ctx.fillStyle = 'rgba(0,0,0,0.55)';
-    ctx.fillRect(0, y - 32, S.W, 60);
-    ctx.fillStyle = phase === 'over' ? '#ff6b8f' : '#ffd75f';
-    ctx.fillText(message, S.W / 2, y + 4);
-    ctx.font = '11px "Segoe UI", sans-serif';
-    ctx.fillStyle = 'rgba(255,255,255,0.8)';
-    ctx.fillText(phase === 'over' ? '잠시 후 처음부터 다시 시작합니다' : '다음 스테이지로!', S.W / 2, y + 22);
-    ctx.restore();
+    var y = Math.round(S.H / 2) - 20;
+    ctx.fillStyle = 'rgba(0,0,0,0.7)';
+    ctx.fillRect(0, y - 10, S.W, 46);
+    drawText(message, Math.round((S.W - textW(message, 3)) / 2), y, phase === 'over' ? '#ff6b8f' : '#ffd75f', 3);
+    var sub = phase === 'over' ? 'TRY AGAIN' : 'GET READY';
+    drawText(sub, Math.round((S.W - textW(sub, 1)) / 2), y + 26, '#ffffff', 1);
+  }
+
+  // 왼쪽 벽에 세로로 세우는 EXTEND (원작과 같은 자리)
+  function drawExtendColumn() {
+    var top = 96;
+    // 글자가 벽 무늬에 묻히지 않도록 검은 띠를 깔고 그린다
+    ctx.fillStyle = '#000000';
+    ctx.fillRect(1, top - 6, 14, S.EXTEND.length * 26 + 4);
+    for (var i = 0; i < S.EXTEND.length; i++) {
+      var lit = srv.ex && srv.ex[i];
+      var col = lit ? LETTER_COLORS[i % LETTER_COLORS.length] : '#4a4480';
+      drawText(S.EXTEND.charAt(i), 3, top + i * 26, col, 2);
+    }
+  }
+
+  // 아케이드 점수판 (1UP / HIGH SCORE / 2UP)
+  function drawHud() {
+    ctx.fillStyle = '#000000';
+    ctx.fillRect(0, 0, S.W, HUD_H);
+
+    var players = srv.p || [];
+    var slots = [
+      { label: '1UP', color: '#4ae0ff', x: 12, align: 'left' },
+      { label: 'HIGH SCORE', color: '#ff4f6b', x: S.W / 2, align: 'center' },
+      { label: '2UP', color: '#4ae0ff', x: S.W - 12, align: 'right' }
+    ];
+    var values = [
+      players[0] ? pad(players[0].s, 6) : '',
+      pad(srv.hs || 0, 6),
+      players[1] ? pad(players[1].s, 6) : ''
+    ];
+
+    for (var i = 0; i < slots.length; i++) {
+      var s = slots[i];
+      if (!values[i]) continue;
+      var lw = textW(s.label, 1), vw = textW(values[i], 2);
+      var lx = s.align === 'left' ? s.x : (s.align === 'right' ? s.x - lw : s.x - lw / 2);
+      var vx = s.align === 'left' ? s.x : (s.align === 'right' ? s.x - vw : s.x - vw / 2);
+      // 1UP 은 원작처럼 깜빡인다
+      if (i !== 1 && (frame % 60) < 30) drawText(s.label, Math.round(lx), 3, s.color, 1);
+      if (i === 1) drawText(s.label, Math.round(lx), 3, s.color, 1);
+      drawText(values[i], Math.round(vx), 13, '#ffffff', 2);
+    }
+
+    // 남은 목숨을 작은 캐릭터로 표시
+    for (var pi = 0; pi < Math.min(2, players.length); pi++) {
+      var p = players[pi];
+      var pal = SP.playerPalette(p.c, shade(p.c, 70), shade(p.c, -80));
+      var icon = bakeSprite('bub' + p.c, SP.BUB, pal, false);
+      for (var l = 0; l < Math.min(p.l, 5); l++) {
+        var ix = pi === 0 ? 12 + l * 11 : S.W - 12 - (l + 1) * 11;
+        ctx.drawImage(icon, 0, 0, icon.width, icon.height, ix, 29, 10, 10);
+      }
+    }
+
+    var stageText = 'STAGE ' + (level + 1);
+    drawText(stageText, Math.round((S.W - textW(stageText, 1)) / 2), 31, '#8f86ff', 1);
+
+    if (players.length > 2) {
+      var extra = '';
+      for (var q = 2; q < players.length; q++) extra += (q + 1) + 'UP ' + pad(players[q].s, 6) + '  ';
+      drawText(extra.trim(), Math.round(S.W - textW(extra.trim(), 1) - 100), 31, '#ffd75f', 1);
+    }
   }
 
   function render() {
-    drawBackground();
-    drawMap();
+    ctx.fillStyle = '#000000';
+    ctx.fillRect(0, 0, S.W, VIEW_H);
+
+    drawHud();
+
+    ctx.save();
+    ctx.translate(0, HUD_H);       // 아래쪽이 실제 플레이 화면
+
+    ctx.drawImage(mapCanvas, 0, 0);
+    drawExtendColumn();
 
     // 과일
     for (var i = 0; i < srv.f.length; i++) {
@@ -648,7 +717,7 @@
     for (var j = 0; j < srv.e.length; j++) {
       var e = srv.e[j];
       var ev = lerpView('e' + e.i, e.x, e.y);
-      drawEnemyBody(ev.x, ev.y, e.t, e.d, e.a, 1);
+      drawEnemy(ev.x + S.EW / 2, ev.y + S.EH, e.t, e.d, e.a);
     }
 
     // 보스의 불덩이
@@ -662,7 +731,7 @@
     for (var k = 0; k < srv.b.length; k++) {
       var b = srv.b[k];
       var bv = lerpView('b' + b.i, b.x, b.y);
-      drawBubble(bv.x, bv.y, b.e, b.w);
+      drawBubble(bv.x, bv.y, b.e, b.w, b.o);
     }
 
     // 플레이어
@@ -673,7 +742,7 @@
       var px, py;
       if (p.i === myId && me) { px = me.x; py = me.y; }
       else { var pv = lerpView('p' + p.i, p.x, p.y); px = pv.x; py = pv.y; }
-      drawPlayer(px, py, p.c, p.i === myId && me ? me.facing : p.f, p.m, p.v, p.n, p.i === myId);
+      drawPlayer(px + S.PW / 2, py + S.PH, p.c, p.i === myId && me ? me.facing : p.f, p.m, p.v, p.n, p.i === myId);
     }
 
     // 이펙트
@@ -685,26 +754,22 @@
     }
     ctx.globalAlpha = 1;
 
-    ctx.font = 'bold 9px "Segoe UI", sans-serif';
-    ctx.textAlign = 'center';
     for (var q = 0; q < floaters.length; q++) {
       var fl = floaters[q];
       ctx.globalAlpha = Math.min(1, fl.life / 30);
-      ctx.fillStyle = '#ffd75f';
-      ctx.fillText(fl.text, fl.x, fl.y);
+      drawText(fl.text, Math.round(fl.x - textW(fl.text, 1) / 2), Math.round(fl.y), '#ffd75f', 1);
     }
     ctx.globalAlpha = 1;
-    ctx.textAlign = 'left';
 
     if (srv.combo > 1) {
-      ctx.font = 'bold 12px "Segoe UI", sans-serif';
-      ctx.fillStyle = '#ff9de0';
-      ctx.fillText('COMBO x' + srv.combo, 22, 30);
+      var ctext = 'COMBO X' + srv.combo;
+      drawText(ctext, 24, 24, '#ff9de0', 1);
     }
 
     if (srv.bs) drawBossHealth(srv.bs);
 
     drawOverlayText();
+    ctx.restore();
   }
 
   // ---------------------------------------------------------------- 루프
@@ -749,10 +814,11 @@
     var aw = stage.clientWidth, ah = stage.clientHeight;
     if (aw === lastFitW && ah === lastFitH) return;
     lastFitW = aw; lastFitH = ah;
-    var scale = Math.max(1, Math.min(Math.floor(aw / S.W * 2) / 2, Math.floor(ah / S.H * 2) / 2));
+    var scale = Math.max(1, Math.min(Math.floor(aw / S.W * 2) / 2, Math.floor(ah / VIEW_H * 2) / 2));
     canvas.style.width = (S.W * scale) + 'px';
-    canvas.style.height = (S.H * scale) + 'px';
+    canvas.style.height = (VIEW_H * scale) + 'px';
   }
 
+  renderMapCanvas();
   requestAnimationFrame(loop);
 })();
